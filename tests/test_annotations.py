@@ -1,17 +1,17 @@
 import numpy as np
 import pytest
 
-from common.config import ROOT
-from detection.annotations import (
+from saliency_driving.annotations import (
     NUM_CLASSES,
     boxes_from_gt_mask,
     load_gt_boxes,
     load_gt_boxes_for_split,
 )
+from saliency_driving.config import ROOT
 
 
 def test_num_classes():
-    assert NUM_CLASSES == 2  # background + salient_object
+    assert NUM_CLASSES == 2
 
 
 def test_single_component():
@@ -19,8 +19,7 @@ def test_single_component():
     mask[20:60, 30:80] = 255
     boxes, labels = boxes_from_gt_mask(mask)
     assert len(boxes) == 1
-    x1, y1, x2, y2 = boxes[0]
-    assert (x1, y1, x2, y2) == (30, 20, 80, 60)
+    assert tuple(boxes[0]) == (30, 20, 80, 60)
     assert labels == [1]
 
 
@@ -34,7 +33,7 @@ def test_two_components():
 
 def test_tiny_components_dropped():
     mask = np.zeros((100, 100), np.uint8)
-    mask[50, 50] = 255  # single pixel, below min area
+    mask[50, 50] = 255
     boxes, labels = boxes_from_gt_mask(mask)
     assert boxes == [] and labels == []
 
@@ -45,7 +44,6 @@ def test_empty_mask():
 
 
 def test_load_with_scaling(tiny_split):
-    # mask is 60x40 with box (20,10,50,30); scale to 120x80 doubles coords
     boxes, labels = load_gt_boxes(str(tiny_split / "GT"), "img_a.jpg", target_size=(120, 80))
     assert len(boxes) == 1
     assert boxes[0] == [40.0, 20.0, 100.0, 60.0]

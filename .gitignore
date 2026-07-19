@@ -24,16 +24,22 @@ models/checkpoints/
 models/*.pt
 models/*.pth
 models/*.ckpt
+!models/.gitkeep
 
 downloads/
+
+# Generated outputs (results/saliency_maps is kept as runnable sample data).
 results/tensorboard/
+results/ablation/
+results/single/
+results/detection_outputs/
+results/simulation_outputs/
+
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
 build/
 dist/
-
-!models/*.py
 
 notebooks/
 */.ipynb_checkpoints/

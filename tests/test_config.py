@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from common.config import (
+from saliency_driving.config import (
     DEFAULTS,
     ROOT,
     _merge,
@@ -22,7 +22,7 @@ def test_load_config_has_all_sections():
 def test_merge_deep_override():
     merged = _merge(DEFAULTS, {"training": {"lr": 0.5}})
     assert merged["training"]["lr"] == 0.5
-    assert merged["training"]["epochs"] == DEFAULTS["training"]["epochs"]  # untouched
+    assert merged["training"]["epochs"] == DEFAULTS["training"]["epochs"]
 
 
 def test_dataset_env_override(monkeypatch):

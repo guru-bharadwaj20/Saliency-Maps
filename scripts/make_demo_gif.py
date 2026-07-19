@@ -1,10 +1,4 @@
-"""Assemble the simulation frames into an animated GIF for the README.
-
-Usage:
-    python scripts/make_demo_gif.py [--dataset NJUD] [--out docs/demo.gif]
-
-Run `python main.py --simulate` first so the frames exist.
-"""
+"""Assemble simulation frames into docs/demo.gif (run `main.py --simulate` first)."""
 
 import argparse
 import glob
@@ -17,14 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common import get_logger, load_config, resolve_path
+from saliency_driving import get_logger, load_config, resolve_path
 
 log = get_logger(__name__)
 
 
 def make_gif(dataset="NJUD", out_path=None, frame_ms=400, width=480):
-    cfg = load_config()
-    frames_dir = resolve_path("simulation_outputs", cfg) / dataset
+    frames_dir = resolve_path("simulation_outputs") / dataset
     frame_files = sorted(glob.glob(str(frames_dir / f"{dataset}_frame_*.png")))
     if not frame_files:
         raise RuntimeError(
@@ -41,8 +34,8 @@ def make_gif(dataset="NJUD", out_path=None, frame_ms=400, width=480):
 
     frames[0].save(out_path, save_all=True, append_images=frames[1:],
                    duration=frame_ms, loop=0, optimize=True)
-    size_kb = out_path.stat().st_size // 1024
-    log.info("GIF written: %s (%d frames, %d KB)", out_path, len(frames), size_kb)
+    log.info("GIF written: %s (%d frames, %d KB)",
+             out_path, len(frames), out_path.stat().st_size // 1024)
     return out_path
 
 

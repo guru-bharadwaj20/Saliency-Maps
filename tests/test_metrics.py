@@ -1,6 +1,6 @@
 import numpy as np
 
-from detection.metrics import (
+from saliency_driving.metrics import (
     adaptive_fmeasure,
     average_precision,
     compute_iou,
@@ -18,7 +18,6 @@ class TestIoU:
         assert compute_iou([0, 0, 10, 10], [20, 20, 30, 30]) == 0.0
 
     def test_half_overlap(self):
-        # overlap 50, union 150
         assert abs(compute_iou([0, 0, 10, 10], [5, 0, 15, 10]) - 1 / 3) < 1e-6
 
 
@@ -51,7 +50,6 @@ class TestSaliencyMetrics:
         assert mae(square_gt, square_gt) == 0.0
 
     def test_mae_known_value(self, square_gt):
-        # 1600 foreground px / 10000 total = 0.16
         assert abs(mae(np.zeros_like(square_gt), square_gt) - 0.16) < 1e-6
 
     def test_fmeasure_perfect(self, square_gt):

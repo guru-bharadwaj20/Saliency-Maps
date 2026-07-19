@@ -1,7 +1,7 @@
 import numpy as np
 
-from saliency_generation import mono_depth
-from saliency_generation.heuristic_saliency import spectral_residual_saliency
+from saliency_driving.saliency import mono_depth
+from saliency_driving.saliency.heuristic import spectral_residual_saliency
 
 
 def test_spectral_residual_shape_and_range():
@@ -15,11 +15,9 @@ def test_spectral_residual_shape_and_range():
 
 def test_spectral_residual_highlights_structure():
     img = np.zeros((128, 128), np.uint8)
-    img[50:80, 50:80] = 255  # a single salient block on empty background
+    img[50:80, 50:80] = 255
     sal = spectral_residual_saliency(img)
-    inside = sal[55:75, 55:75].mean()
-    outside = sal[:30, :30].mean()
-    assert inside > outside
+    assert sal[55:75, 55:75].mean() > sal[:30, :30].mean()
 
 
 def test_spectral_residual_flat_image():

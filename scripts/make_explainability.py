@@ -1,17 +1,6 @@
-"""Explainability figures: what does the network actually look at?
-
-For a few test images, renders a grid comparing:
-    1. the input RGB,
-    2. the cmSalGAN saliency map fed to the fusion module,
-    3. the fusion module's learned attention map,
-    4. EigenCAM of the detector backbone — baseline (no fusion) vs.
-       fusion+attention variant.
-
-EigenCAM (Muhammad & Yeasin, 2020) is the first principal component of the
-backbone's last conv activations — gradient-free, so it works cleanly on
-Faster R-CNN. Output: docs/explainability.png.
-
-Usage: python scripts/make_explainability.py  (run scripts/run_ablation.py first)
+"""Explainability grid: input RGB, saliency, fusion attention, and EigenCAM of
+the detector backbone (baseline vs. fusion+attention). Writes docs/explainability.png.
+Run scripts/run_ablation.py first. Usage: python scripts/make_explainability.py
 """
 
 import sys
@@ -25,20 +14,20 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common import dataset_name, get_device, get_logger, load_config, resolve_path
-from datasets.saliency_dataset import INPUT_SIZE
-from detection.test_detector import load_models
+from saliency_driving import dataset_name, get_device, get_logger, load_config, resolve_path
+from saliency_driving.datasets import INPUT_SIZE
+from saliency_driving.evaluate import load_models
 
 log = get_logger(__name__)
 
-PANEL = 224          # panel size in the output grid
+PANEL = 224
 N_IMAGES = 3
 HEADERS = ["Input RGB", "cmSalGAN saliency", "Fusion attention",
            "EigenCAM: baseline", "EigenCAM: fusion+attn"]
 
 
 def eigencam(detector, det_input):
-    """EigenCAM heatmap [0,1] from the backbone's layer4 activations."""
+    """First principal component of the backbone's layer4 activations, in [0, 1]."""
     acts = {}
 
     def hook(_m, _i, out):
@@ -49,13 +38,13 @@ def eigencam(detector, det_input):
         detector(list(det_input))
     handle.remove()
 
-    a = acts["layer4"][0].cpu().numpy()          # (C, h, w)
+    a = acts["layer4"][0].cpu().numpy()
     c, h, w = a.shape
-    x = a.reshape(c, -1).T                        # (hw, C)
+    x = a.reshape(c, -1).T
     x = x - x.mean(axis=0, keepdims=True)
     _, _, vt = np.linalg.svd(x, full_matrices=False)
-    proj = x @ vt[0]                              # (hw,)
-    if abs(proj.min()) > abs(proj.max()):         # resolve sign ambiguity
+    proj = x @ vt[0]
+    if abs(proj.min()) > abs(proj.max()):
         proj = -proj
     cam = np.maximum(proj.reshape(h, w), 0)
     if cam.max() > 1e-8:
@@ -64,9 +53,7 @@ def eigencam(detector, det_input):
 
 
 def heat_panel(gray01, base_bgr=None):
-    """[0,1] map → colored panel, optionally blended over the image."""
-    heat = cv2.applyColorMap((np.clip(gray01, 0, 1) * 255).astype(np.uint8),
-                             cv2.COLORMAP_JET)
+    heat = cv2.applyColorMap((np.clip(gray01, 0, 1) * 255).astype(np.uint8), cv2.COLORMAP_JET)
     heat = cv2.resize(heat, (PANEL, PANEL))
     if base_bgr is not None:
         heat = cv2.addWeighted(cv2.resize(base_bgr, (PANEL, PANEL)), 0.45, heat, 0.55, 0)
@@ -90,13 +77,11 @@ def main():
     det_base, _, _, _ = load_models(cfg, device, baseline_path)
     det_fuse, fusion, _, _ = load_models(cfg, device, fusion_path)
 
-    images = sorted(data_dir.glob("*.jpg"))[:N_IMAGES]
     rows = []
-    for img_path in images:
+    for img_path in sorted(data_dir.glob("*.jpg"))[:N_IMAGES]:
         stem = img_path.stem
         bgr = cv2.imread(str(img_path))
-        rgb_small = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB),
-                               (INPUT_SIZE, INPUT_SIZE))
+        rgb_small = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), (INPUT_SIZE, INPUT_SIZE))
         rgb_t = (torch.from_numpy(rgb_small.astype(np.float32) / 255.0)
                  .permute(2, 0, 1).unsqueeze(0).to(device))
 
@@ -110,16 +95,13 @@ def main():
             attn = fusion.attention(fused_in).squeeze().cpu().numpy()
             fused = fusion(rgb_t, sal_t)
 
-        cam_base = eigencam(det_base, rgb_t)
-        cam_fuse = eigencam(det_fuse, fused)
-
         panels = [cv2.resize(bgr, (PANEL, PANEL)),
                   heat_panel(sal01),
                   heat_panel(attn, bgr),
-                  heat_panel(cam_base, bgr),
-                  heat_panel(cam_fuse, bgr)]
+                  heat_panel(eigencam(det_base, rgb_t), bgr),
+                  heat_panel(eigencam(det_fuse, fused), bgr)]
         rows.append(np.hstack(panels))
-        log.info("Processed %s (attention range %.3f–%.3f)", stem, attn.min(), attn.max())
+        log.info("Processed %s (attention range %.3f-%.3f)", stem, attn.min(), attn.max())
 
     header = np.full((28, PANEL * len(HEADERS), 3), 245, np.uint8)
     for i, text in enumerate(HEADERS):

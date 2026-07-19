@@ -1,8 +1,12 @@
 import numpy as np
 
-from simulation.car_simulator import CarSimulator
-from simulation.obstacle_avoidance import compute_goal_vector, obstacle_avoidance_control, run_step
-from simulation.visualize import scale_boxes
+from saliency_driving.simulation.avoidance import (
+    compute_goal_vector,
+    obstacle_avoidance_control,
+    run_step,
+)
+from saliency_driving.simulation.simulator import CarSimulator
+from saliency_driving.simulation.visualize import scale_boxes
 
 
 def test_goal_vector_is_unit():
@@ -24,7 +28,6 @@ def test_run_step_stays_in_bounds():
 
 def test_detection_repulsion_pushes_away():
     sal = np.zeros((200, 200), np.float32)
-    # obstacle directly between car and goal, close to the car
     det = [[95, 95, 125, 125, 0.9, 1]]
     steer_clear = obstacle_avoidance_control((80, 110), (190, 110), sal)
     steer_block = obstacle_avoidance_control((80, 110), (190, 110), sal, det)
@@ -48,10 +51,9 @@ def test_state_snapshot_is_copied():
     s1 = sim.state()
     sim.update(sal, [], steps=3)
     s2 = sim.state()
-    assert len(s2["path"]) > len(s1["path"])  # s1 must not alias the live path
+    assert len(s2["path"]) > len(s1["path"])
 
 
 def test_scale_boxes():
-    boxes = [[10, 10, 20, 20, 0.9, 1]]
-    scaled = scale_boxes(boxes, (100, 100), (200, 50))
+    scaled = scale_boxes([[10, 10, 20, 20, 0.9, 1]], (100, 100), (200, 50))
     assert scaled == [[20, 5, 40, 10, 0.9, 1]]
