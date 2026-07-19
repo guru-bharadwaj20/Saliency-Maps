@@ -23,16 +23,16 @@ from models.cmSalGAN_model import UnetGAN
 log = get_logger(__name__)
 
 
-def load_models(cfg, device):
-    """Load cmSalGAN, the trained fusion module, and the trained detector."""
+def load_models(cfg, device, model_path=None):
+    """Load the trained detector, its fusion module (if any), and cmSalGAN."""
     from torchvision.models.detection import fasterrcnn_resnet50_fpn
     from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
-    model_path = resolve_path("detector_best", cfg)
-    if not model_path.exists():
+    model_path = model_path or resolve_path("detector_best", cfg)
+    if not os.path.exists(str(model_path)):
         raise FileNotFoundError(
             f"Trained detector not found at {model_path}. Run `python main.py --train` first.")
-    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+    checkpoint = torch.load(str(model_path), map_location=device, weights_only=True)
     if not isinstance(checkpoint, dict) or "detector" not in checkpoint:
         raise RuntimeError(
             f"{model_path} is an old-format checkpoint without fusion weights. "
@@ -45,32 +45,46 @@ def load_models(cfg, device):
     detector.load_state_dict(checkpoint["detector"])
     detector.to(device).eval()
 
-    fusion = SaliencyFusion(use_attention=True).to(device)
-    fusion.load_state_dict(checkpoint["fusion"])
-    fusion.eval()
+    fusion = None
+    fusion_mode = checkpoint.get("fusion_mode", "attention")
+    if fusion_mode != "none":
+        fusion = SaliencyFusion(use_attention=(fusion_mode == "attention")).to(device)
+        fusion.load_state_dict(checkpoint["fusion"])
+        fusion.eval()
 
     saliency_model = None
     sal_ckpt = resolve_path("cmsalgan_ckpt", cfg)
-    if sal_ckpt.exists():
-        saliency_model = UnetGAN().to(device)
-        saliency_model.load_state_dict(torch.load(sal_ckpt, map_location=device))
-        saliency_model.eval()
-    else:
-        log.warning("%s not found — falling back to precomputed saliency maps "
-                    "in results/saliency_maps/.", sal_ckpt)
+    if fusion is not None:
+        if sal_ckpt.exists():
+            saliency_model = UnetGAN().to(device)
+            saliency_model.load_state_dict(torch.load(sal_ckpt, map_location=device))
+            saliency_model.eval()
+        else:
+            log.warning("%s not found — falling back to precomputed saliency maps "
+                        "in results/saliency_maps/.", sal_ckpt)
 
     return detector, fusion, checkpoint, saliency_model
 
 
-def get_saliency(saliency_model, img_rgb, img_dep, stem, sal_root, device):
-    """Saliency at tensor resolution: cmSalGAN if available, else precomputed map."""
-    if saliency_model is not None:
-        with torch.no_grad():
-            sal = saliency_model([normalize_imagenet(img_rgb), img_dep], mode=2)
-        return torch.clamp(sal, 0, 1)
-    sal_path = os.path.join(sal_root, stem + ".png")
-    if os.path.exists(sal_path):
-        sal = cv2.imread(sal_path, cv2.IMREAD_GRAYSCALE)
+def get_saliency(source, saliency_model, img_rgb, img_dep, stem, sal_root, gt_dir, device):
+    """Saliency at tensor resolution for one image, per the chosen source.
+
+    precomputed — cmSalGAN live if the checkpoint exists, else the saved map
+    gt          — the ground-truth mask (oracle condition, label it as such)
+    zero        — all-zero map (control)
+    """
+    if source == "zero":
+        return torch.zeros((1, 1, INPUT_SIZE, INPUT_SIZE), device=device)
+    if source == "gt":
+        path = os.path.join(gt_dir, stem + ".png")
+    else:  # precomputed
+        if saliency_model is not None:
+            with torch.no_grad():
+                sal = saliency_model([normalize_imagenet(img_rgb), img_dep], mode=2)
+            return torch.clamp(sal, 0, 1)
+        path = os.path.join(sal_root, stem + ".png")
+    if os.path.exists(path):
+        sal = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         sal = cv2.resize(sal, (INPUT_SIZE, INPUT_SIZE)).astype(np.float32) / 255.0
         return torch.from_numpy(sal)[None, None].to(device)
     return torch.zeros((1, 1, INPUT_SIZE, INPUT_SIZE), device=device)
@@ -92,12 +106,16 @@ def visualize_results(rgb_path, boxes, save_path, score_threshold):
     cv2.imwrite(save_path, img)
 
 
-def run_inference():
+def run_inference(model_path=None, saliency_source=None, save_images=True):
     """Run the full test pipeline. Returns (preds, checkpoint_info, timing).
 
     preds: {image_stem: [[x1, y1, x2, y2, score, cls], ...]} in ORIGINAL
     image coordinates — the same space as the saved saliency maps and GT.
     Also writes results/detection_outputs/<DATASET>_detections.json.
+
+    saliency_source overrides the source stored in the checkpoint
+    (precomputed | gt | zero) — e.g. to test an oracle-trained model on
+    realistic cmSalGAN maps.
     """
     cfg = load_config()
     set_seed(cfg["seed"])
@@ -106,10 +124,14 @@ def run_inference():
     data_path = resolve_path("data", cfg) / ds_name / "test"
     save_path = resolve_path("detection_outputs", cfg)
     sal_root = resolve_path("saliency_maps", cfg) / ds_name
+    gt_dir = data_path / "GT"
     score_threshold = cfg["detection"]["score_threshold"]
 
     save_path.mkdir(parents=True, exist_ok=True)
-    detector, fusion, checkpoint, saliency_model = load_models(cfg, device)
+    detector, fusion, checkpoint, saliency_model = load_models(cfg, device, model_path)
+    source = saliency_source or checkpoint.get("saliency_source", "precomputed")
+    log.info("Testing with fusion=%s, saliency=%s",
+             checkpoint.get("fusion_mode", "attention"), source)
     test_loader = DataLoader(CustomDataset(str(data_path)), batch_size=1, shuffle=False)
 
     preds = {}
@@ -121,9 +143,13 @@ def run_inference():
         orig_w, orig_h = int(orig_size[0][0]), int(orig_size[0][1])
 
         start = time.perf_counter()
-        sal = get_saliency(saliency_model, img_rgb, img_dep, stem, str(sal_root), device)
         with torch.no_grad():
-            fused = fusion(img_rgb, sal)
+            if fusion is not None:
+                sal = get_saliency(source, saliency_model, img_rgb, img_dep,
+                                   stem, str(sal_root), str(gt_dir), device)
+                fused = fusion(img_rgb, sal)
+            else:
+                fused = img_rgb
             outputs = detector(list(fused))
         total_time += time.perf_counter() - start
 
@@ -140,8 +166,9 @@ def run_inference():
                       for j, b in enumerate(boxes)]
         preds[stem] = pred_boxes
 
-        visualize_results(str(data_path / "RGB" / img_name[0]), pred_boxes,
-                          str(save_path / f"{stem}.jpg"), score_threshold)
+        if save_images:
+            visualize_results(str(data_path / "RGB" / img_name[0]), pred_boxes,
+                              str(save_path / f"{stem}.jpg"), score_threshold)
 
     preds_path = save_path / f"{ds_name}_detections.json"
     with open(preds_path, "w") as f:

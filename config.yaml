@@ -26,6 +26,8 @@ training:
   epochs: 3
   lr: 1.0e-4
   num_workers: 0        # keep 0 on Windows
+  fusion_mode: attention        # attention | plain (no attention) | none (raw RGB baseline)
+  saliency_source: precomputed  # precomputed (cmSalGAN maps) | gt (oracle masks) | zero
 
 detection:
   score_threshold: 0.5        # min confidence for drawing / P-R-F1

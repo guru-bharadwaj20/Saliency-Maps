@@ -32,39 +32,48 @@ log = get_logger(__name__)
 
 
 class FusedDetectionDataset(Dataset):
-    """RGB + precomputed saliency + boxes derived from GT saliency masks.
+    """RGB + saliency + boxes derived from GT saliency masks.
 
-    If a precomputed saliency map is missing the sample falls back to a
-    zero map (and says so once), so training degrades gracefully instead of
-    silently training on garbage.
+    saliency_source:
+        precomputed — cmSalGAN maps from results/saliency_maps/ (zero fallback,
+                      announced once, so training degrades gracefully)
+        gt          — the GT mask itself as an oracle saliency signal
+        zero        — all-zero maps (control condition)
     """
 
-    def __init__(self, root_dir, split="train", saliency_dir=None):
+    def __init__(self, root_dir, split="train", saliency_dir=None,
+                 saliency_source="precomputed"):
         self.root_dir = os.path.join(root_dir, split)
         self.custom = CustomDataset(self.root_dir)
         self.saliency_dir = saliency_dir
+        self.saliency_source = saliency_source
         self.gt_dir = os.path.join(self.root_dir, "GT")
         self._warned_missing_sal = False
 
     def __len__(self):
         return len(self.custom)
 
+    def _load_saliency(self, stem, shape):
+        if self.saliency_source == "zero":
+            return torch.zeros((1, *shape))
+        if self.saliency_source == "gt":
+            path = os.path.join(self.gt_dir, stem + ".png")
+        else:  # precomputed
+            path = os.path.join(self.saliency_dir or "", stem + ".png")
+        if os.path.exists(path):
+            sal = transforms.ToTensor()(Image.open(path).convert("L"))
+            return transforms.Resize(shape)(sal)
+        if not self._warned_missing_sal:
+            log.warning("No %s saliency map for %s (looked at %s); using zeros. "
+                        "Run `python main.py --saliency` first for real fusion input.",
+                        self.saliency_source, stem, path)
+            self._warned_missing_sal = True
+        return torch.zeros((1, *shape))
+
     def __getitem__(self, idx):
         rgb, dep, img_name, orig_size = self.custom[idx]
         stem = os.path.splitext(img_name)[0]
-
-        sal_path = os.path.join(self.saliency_dir or "", stem + ".png")
-        if self.saliency_dir and os.path.exists(sal_path):
-            sal = Image.open(sal_path).convert("L")
-            sal = transforms.ToTensor()(sal)
-            sal = transforms.Resize(rgb.shape[1:])(sal)
-        else:
-            if not self._warned_missing_sal:
-                log.warning("No precomputed saliency map for %s (looked in %s); "
-                            "using zeros. Run `python main.py --saliency` first "
-                            "for real fusion input.", stem, self.saliency_dir)
-                self._warned_missing_sal = True
-            sal = torch.zeros((1, rgb.shape[1], rgb.shape[2]))
+        sal = self._load_saliency(stem, rgb.shape[1:])
 
         # Boxes from the GT mask, scaled to the tensor resolution the model sees.
         boxes, labels = load_gt_boxes(self.gt_dir, img_name,
@@ -94,25 +103,38 @@ def collate_fn(batch):
     return rgbs, sals, targets, names
 
 
-def train():
+def train(fusion_mode=None, saliency_source=None, epochs=None, out_path=None):
+    """Train the detector (+ optional fusion). Returns a run summary dict.
+
+    fusion_mode:     attention | plain | none  (default: config)
+    saliency_source: precomputed | gt | zero   (default: config)
+    out_path:        where the best checkpoint goes (default: models/detector_best.pt)
+    """
     cfg = load_config()
     seed = set_seed(cfg["seed"])
     device = get_device(cfg)
     ds_name = dataset_name(cfg)
     tcfg = cfg["training"]
+    fusion_mode = fusion_mode or tcfg["fusion_mode"]
+    saliency_source = saliency_source or tcfg["saliency_source"]
+    epochs = epochs or tcfg["epochs"]
+    if fusion_mode not in ("attention", "plain", "none"):
+        raise ValueError(f"Unknown fusion_mode: {fusion_mode}")
 
     save_dir = resolve_path("checkpoints", cfg)
     save_dir.mkdir(parents=True, exist_ok=True)
-    best_model_path = resolve_path("detector_best", cfg)
+    best_model_path = out_path or resolve_path("detector_best", cfg)
     saliency_dir = resolve_path("saliency_maps", cfg) / ds_name
 
     dataset = FusedDetectionDataset(
         root_dir=str(resolve_path("data", cfg) / ds_name),
         split="train",
-        saliency_dir=str(saliency_dir))
+        saliency_dir=str(saliency_dir),
+        saliency_source=saliency_source)
     n_annotated = sum(1 for i in range(len(dataset)) if len(dataset[i][2]["boxes"]) > 0)
-    log.info("Dataset: %s/train — %d images, %d with GT-derived boxes (seed=%d, device=%s)",
-             ds_name, len(dataset), n_annotated, seed, device)
+    log.info("Dataset: %s/train — %d images, %d with GT-derived boxes "
+             "(fusion=%s, saliency=%s, seed=%d, device=%s)",
+             ds_name, len(dataset), n_annotated, fusion_mode, saliency_source, seed, device)
     if n_annotated == 0:
         gt_dir = resolve_path('data', cfg) / ds_name / 'train' / 'GT'
         raise RuntimeError(
@@ -123,14 +145,18 @@ def train():
                              num_workers=tcfg["num_workers"], collate_fn=collate_fn)
     model = get_fasterrcnn_model(NUM_CLASSES, device)
     model.train()
-    fusion = SaliencyFusion(use_attention=True).to(device)
-    fusion.train()
-    params = [p for p in model.parameters() if p.requires_grad] + list(fusion.parameters())
+    fusion = None
+    params = [p for p in model.parameters() if p.requires_grad]
+    if fusion_mode != "none":
+        fusion = SaliencyFusion(use_attention=(fusion_mode == "attention")).to(device)
+        fusion.train()
+        params += list(fusion.parameters())
     optimizer = optim.Adam(params, lr=tcfg["lr"])
 
     writer = None
     if SummaryWriter is not None:
-        tb_dir = resolve_path("tensorboard", cfg) / time.strftime(f"{ds_name}_%Y%m%d_%H%M%S")
+        tb_dir = resolve_path("tensorboard", cfg) / time.strftime(
+            f"{ds_name}_{fusion_mode}_{saliency_source}_%Y%m%d_%H%M%S")
         writer = SummaryWriter(log_dir=str(tb_dir))
         log.info("TensorBoard logs: %s (view with `tensorboard --logdir %s`)",
                  tb_dir, resolve_path("tensorboard", cfg))
@@ -141,15 +167,16 @@ def train():
     best_loss = float("inf")
     best_epoch = -1
     global_step = 0
+    train_start = time.time()
     log.info("Starting training: %d epochs, batch %d, lr %g",
-             tcfg["epochs"], tcfg["batch_size"], tcfg["lr"])
-    for epoch in range(tcfg["epochs"]):
+             epochs, tcfg["batch_size"], tcfg["lr"])
+    for epoch in range(epochs):
         epoch_loss = 0.0
         start_time = time.time()
         pbar = tqdm(data_loader)
         for rgbs, sals, targets, _names in pbar:
             rgbs, sals = rgbs.to(device), sals.to(device)
-            fused = fusion(rgbs, sals)
+            fused = fusion(rgbs, sals) if fusion is not None else rgbs
             tv_targets = [{"boxes": t["boxes"].to(device),
                            "labels": t["labels"].to(device)} for t in targets]
             losses = model(list(fused), tv_targets)
@@ -162,7 +189,7 @@ def train():
             if writer:
                 writer.add_scalar("train/loss_step", step_loss, global_step)
             global_step += 1
-            pbar.set_description(f"Epoch {epoch + 1}/{tcfg['epochs']} Loss: {step_loss:.4f}")
+            pbar.set_description(f"Epoch {epoch + 1}/{epochs} Loss: {step_loss:.4f}")
 
         avg_loss = epoch_loss / len(data_loader)
         elapsed = time.time() - start_time
@@ -172,7 +199,9 @@ def train():
 
         checkpoint = {
             "detector": model.state_dict(),
-            "fusion": fusion.state_dict(),
+            "fusion": fusion.state_dict() if fusion is not None else None,
+            "fusion_mode": fusion_mode,
+            "saliency_source": saliency_source,
             "epoch": epoch + 1,
             "avg_loss": avg_loss,
             "num_classes": NUM_CLASSES,
@@ -187,8 +216,12 @@ def train():
 
     if writer:
         writer.close()
+    total_time = time.time() - train_start
     log.info("Training finished — Best model: Epoch %d | Loss: %.4f", best_epoch, best_loss)
-    log.info("Saved to %s (contains detector + fusion weights)", best_model_path)
+    log.info("Saved to %s", best_model_path)
+    return {"best_epoch": best_epoch, "best_loss": best_loss,
+            "fusion_mode": fusion_mode, "saliency_source": saliency_source,
+            "out_path": str(best_model_path), "train_time_s": total_time}
 
 
 if __name__ == "__main__":

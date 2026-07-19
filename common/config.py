@@ -45,6 +45,8 @@ DEFAULTS: dict = {
         "epochs": 3,
         "lr": 1.0e-4,
         "num_workers": 0,
+        "fusion_mode": "attention",        # attention | plain | none
+        "saliency_source": "precomputed",  # precomputed | gt | zero
     },
     "detection": {
         "score_threshold": 0.5,
