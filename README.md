@@ -17,6 +17,9 @@ Built using **PyTorch**, **OpenCV**, and the **cmSalGAN saliency model**, this p
 * **Faster R-CNN object detection** trained on boxes derived from GT saliency masks (connected components → bounding boxes, class `salient_object`)
 * **Real evaluation metrics** — saliency: MAE, adaptive F-measure, S-measure vs. GT masks; detection: AP@0.5, precision/recall/F1; measured inference time
 * **Ablation harness** (`scripts/run_ablation.py`) — trains fusion/attention/baseline variants under identical seeds and emits a comparison table (see Results)
+* **Works on ANY image** — MiDaS monocular depth removes the RGB-D dataset requirement: `python main.py --infer photo.jpg`
+* **Interactive web demo** (`app.py`, Gradio) — upload a photo, see depth → saliency → detections → car simulation; deployable to Hugging Face Spaces
+* **Explainability figures** (`scripts/make_explainability.py`) — fusion attention maps + EigenCAM showing where each detector variant looks
 * **Autonomous car simulation**: potential-field steering (goal attraction + saliency-gradient and detection-box repulsion) over the frame stream
 * **Frame-by-frame visualization** (car, path trace, goal, detections, heatmap overlay) + final `.avi` simulation video
 * **End-to-end modular pipeline** via `main.py`
@@ -136,6 +139,22 @@ training on the full NJUD dataset (~1,985 images), warm-starting the fusion modu
 an identity mapping, and longer schedules. The ablation harness makes those one-line
 experiments (`python scripts/run_ablation.py --epochs N --saliency-source precomputed`).
 
+### Explainability — *seeing* why the baseline won
+
+`python scripts/make_explainability.py` renders where each network actually looks:
+
+<p align="center">
+  <img src="docs/explainability.png" alt="Explainability grid: RGB, saliency, fusion attention, EigenCAM baseline vs fusion" width="720">
+</p>
+
+The figure corroborates the ablation numbers: cmSalGAN saliency (col 2) correctly
+highlights the objects, and the **baseline** detector's EigenCAM (col 4) focuses on
+them — but the fusion module's learned attention (col 3) is almost uniform
+(range ≈ 0.45–0.46, i.e. it learned nothing in 3 epochs on 10 images), and the
+fusion variant's EigenCAM (col 5) degenerates to image borders. The fusion frontend
+disrupted the pretrained features rather than guiding them — exactly what the
+AP numbers say, now visible.
+
 ---
 
 
@@ -166,6 +185,29 @@ python main.py --visualize --dataset NJUD
 
 > Stages depend on each other in that order: `--train`/`--test` expect saliency maps,
 > and `--simulate` gives best results after `--test` has produced detections.
+
+### Try it on YOUR OWN images (no RGB-D dataset needed)
+
+```bash
+pip install timm                      # enables MiDaS monocular depth
+python main.py --infer path/to/any_photo.jpg
+```
+
+MiDaS estimates depth from the RGB alone, then the full chain runs:
+depth → saliency → detection → a car simulation on that scene. Outputs land in
+`results/single/` (`_depth`, `_saliency`, `_overlay`, `_simulation` images).
+Every output is labeled with its source — if the cmSalGAN checkpoint is absent,
+saliency falls back to the classical spectral-residual method and says so.
+
+### Interactive web demo
+
+```bash
+pip install gradio timm
+python app.py          # local demo at http://127.0.0.1:7860
+```
+
+Upload any photo and see all four pipeline stages side by side. To publish it as a
+free public demo, see [docs/DEPLOY_HF_SPACES.md](docs/DEPLOY_HF_SPACES.md).
 
 ---
 
@@ -199,12 +241,14 @@ saliency-aware-autonomous-driving/
 │   ├── detection_outputs/       # Prediction images + <DATASET>_detections.json
 │   ├── simulation_outputs/      # Frames + final simulation video
 │   └── tensorboard/             # Training loss curves (if tensorboard installed)
-├── saliency_generation/         # cmSalGAN saliency generation
+├── saliency_generation/         # cmSalGAN + MiDaS mono-depth + heuristic saliency
 ├── simulation/                  # Car simulator, obstacle avoidance, visualizer
-├── scripts/                     # download_data.py (gdown)
+├── scripts/                     # download_data, run_ablation, make_demo_gif, make_explainability
 ├── tests/                       # pytest suite (run: pytest -m "not slow")
+├── docs/                        # demo.gif, explainability.png, HF Spaces deploy guide
 ├── config.yaml                  # All paths & hyperparameters
-├── main.py                      # Pipeline orchestrator
+├── main.py                      # Pipeline orchestrator (+ --infer for any image)
+├── app.py                       # Gradio web demo
 ├── pyproject.toml               # Packaging + ruff/black/pytest config
 ├── requirements.txt             # Runtime dependencies
 └── requirements-dev.txt         # Dev dependencies (pytest, ruff, black)

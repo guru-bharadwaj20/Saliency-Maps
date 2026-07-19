@@ -23,12 +23,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4", "black>=24.0"]
 extras = ["tensorboard>=2.16", "gdown>=5.1"]
+demo = ["gradio>=4.0", "timm>=0.9"]
 
 [tool.setuptools.packages.find]
 include = ["common*", "datasets*", "detection*", "models*", "saliency_generation*", "simulation*"]
 
 [tool.setuptools]
-py-modules = ["main"]
+py-modules = ["main", "app"]
 
 [tool.ruff]
 line-length = 100

@@ -8,6 +8,9 @@ Stages:
     --simulate   Run the saliency-driven car simulation and render video
     --visualize  Render saliency + detection overlays only (no car)
     --all        Run every stage in order
+    --infer IMG  Run the full pipeline on ANY single RGB image (uses MiDaS
+                 monocular depth; falls back to heuristic saliency without
+                 the cmSalGAN checkpoint)
 
 Configuration lives in config.yaml; --dataset overrides the configured one.
 """
@@ -59,6 +62,37 @@ def run_simulation(dataset, detections_json=None):
                        detections_json=detections_path(dataset, detections_json))
 
 
+def run_infer(image_path):
+    import cv2
+
+    from detection.pipeline import SingleImagePipeline
+    from saliency_generation.mono_depth import colorize_depth
+
+    bgr = cv2.imread(image_path)
+    if bgr is None:
+        raise FileNotFoundError(f"Cannot read image: {image_path}")
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+    pipe = SingleImagePipeline()
+    result = pipe.run(rgb)
+    sim_frame = pipe.simulate(rgb, result)
+
+    out_dir = resolve_path("results") / "single"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(image_path).stem
+    cv2.imwrite(str(out_dir / f"{stem}_overlay.png"), result["overlay_bgr"])
+    cv2.imwrite(str(out_dir / f"{stem}_saliency.png"),
+                (result["saliency"] * 255).astype("uint8"))
+    if result["depth"] is not None:
+        cv2.imwrite(str(out_dir / f"{stem}_depth.png"), colorize_depth(result["depth"]))
+    cv2.imwrite(str(out_dir / f"{stem}_simulation.png"), sim_frame)
+
+    n_conf = sum(1 for d in result["detections"]
+                 if d[4] >= load_config()["detection"]["score_threshold"])
+    log.info("Depth: %s | Saliency: %s", result["depth_source"], result["saliency_source"])
+    log.info("%d confident detection(s); outputs in %s", n_conf, out_dir)
+
+
 def run_visualize(dataset, detections_json=None):
     from simulation.visualize import visualize_sequence
     visualize_sequence(dataset=dataset,
@@ -81,6 +115,8 @@ def parse_args():
                    help=f"Dataset name (default from config.yaml: {cfg['dataset']})")
     p.add_argument("--detections_json", default=None,
                    help="Override path to detections JSON for simulate/visualize")
+    p.add_argument("--infer", default=None, metavar="IMAGE",
+                   help="Run the pipeline on a single arbitrary RGB image")
     return p.parse_args()
 
 
@@ -103,6 +139,9 @@ def main():
             ran_any = True
         if args.visualize and not (args.all or args.simulate):
             run_visualize(args.dataset, args.detections_json)
+            ran_any = True
+        if args.infer:
+            run_infer(args.infer)
             ran_any = True
 
         if not ran_any:

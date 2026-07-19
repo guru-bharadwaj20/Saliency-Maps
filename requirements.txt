@@ -19,3 +19,5 @@ tqdm>=4.66.5
 # --- Optional (uncomment to enable) ---
 # tensorboard>=2.16   # training loss curves (results/tensorboard/)
 # gdown>=5.1          # scripts/download_data.py (dataset + checkpoint download)
+# timm>=0.9           # MiDaS monocular depth (main.py --infer, web demo)
+# gradio>=4.0         # web demo (app.py); see docs/DEPLOY_HF_SPACES.md
