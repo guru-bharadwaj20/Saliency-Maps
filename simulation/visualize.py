@@ -4,9 +4,13 @@ import json
 import numpy as np
 from typing import List, Tuple
 
-HEATMAP_ALPHA = 0.55
+WINDOW_W = 640
+WINDOW_H = 480
+HEATMAP_ALPHA = 0.45
 DETECTION_COLOR = (0, 255, 0)
-UNKNOWN_COLOR = (0, 0, 255)
+CAR_COLOR = (255, 255, 255)
+PATH_COLOR = (0, 200, 255)
+GOAL_COLOR = (255, 0, 255)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -23,10 +27,19 @@ def load_saliency(sal_path: str, size: Tuple[int, int] = None):
     sal = cv2.imread(sal_path, cv2.IMREAD_GRAYSCALE)
     if sal is None:
         raise FileNotFoundError(f"Saliency map not found: {sal_path}")
+    orig_shape = sal.shape  # (h, w) at native resolution
     sal = sal.astype(np.float32) / 255.0
     if size:
         sal = cv2.resize(sal, size)
-    return sal
+    return sal, orig_shape
+
+
+def scale_boxes(detections: List[List], src_size: Tuple[int, int],
+                dst_size: Tuple[int, int]):
+    """Scale [x1,y1,x2,y2,score,cls] boxes from src (w, h) to dst (w, h)."""
+    sx = dst_size[0] / src_size[0]
+    sy = dst_size[1] / src_size[1]
+    return [[b[0] * sx, b[1] * sy, b[2] * sx, b[3] * sy, *b[4:]] for b in detections]
 
 
 def overlay_saliency(rgb_img: np.ndarray, saliency: np.ndarray, alpha=HEATMAP_ALPHA):
@@ -34,72 +47,88 @@ def overlay_saliency(rgb_img: np.ndarray, saliency: np.ndarray, alpha=HEATMAP_AL
     return cv2.addWeighted(rgb_img, 1 - alpha, heat, alpha, 0)
 
 
-def draw_detections(img: np.ndarray, detections: List[List]):
+def draw_detections(img: np.ndarray, detections: List[List], score_threshold=0.5):
     for det in detections:
-        x1, y1, x2, y2, score, cls = det
-        color = DETECTION_COLOR if cls in [0, 1, 2, 3] else UNKNOWN_COLOR
-        label = f"{int(cls)}:{score:.2f}"
-        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-        cv2.putText(img, label, (int(x1), int(y1 - 5)), FONT, 0.5, color, 1)
+        x1, y1, x2, y2, score = det[:5]
+        if score < score_threshold:
+            continue
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), DETECTION_COLOR, 2)
+        cv2.putText(img, f"{score:.2f}", (int(x1), max(int(y1) - 5, 12)),
+                    FONT, 0.5, DETECTION_COLOR, 1)
     return img
 
 
-def visualize_frame(rgb_path: str, sal_path: str, detections: List[List],
-                    save_path: str = None):
+def draw_car_state(img: np.ndarray, state: dict, goal: Tuple[float, float]):
+    """Draw path trace, car, heading arrow, and goal marker for one frame."""
+    path = state.get("path", [])
+    if len(path) > 1:
+        pts = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(img, [pts], isClosed=False, color=PATH_COLOR, thickness=2)
 
-    rgb = load_image(rgb_path)
-    sal = load_saliency(sal_path, size=(rgb.shape[1], rgb.shape[0]))
+    gx, gy = int(goal[0]), int(goal[1])
+    cv2.drawMarker(img, (gx, gy), GOAL_COLOR, cv2.MARKER_STAR, 18, 2)
+    cv2.putText(img, "GOAL", (gx + 10, gy - 10), FONT, 0.5, GOAL_COLOR, 1)
 
-    frame = overlay_saliency(rgb, sal)
-    frame = draw_detections(frame, detections)
+    x, y = int(state["pos"][0]), int(state["pos"][1])
+    cv2.circle(img, (x, y), 8, CAR_COLOR, -1)
+    cv2.circle(img, (x, y), 8, (0, 0, 0), 2)
+    hx, hy = state.get("heading", (1.0, 0.0))
+    cv2.arrowedLine(img, (x, y), (int(x + hx * 25), int(y + hy * 25)),
+                    CAR_COLOR, 2, tipLength=0.4)
 
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        cv2.imwrite(save_path, frame)
-
-    return frame
+    if state.get("reached"):
+        cv2.putText(img, "GOAL REACHED", (WINDOW_W // 2 - 100, 40),
+                    FONT, 0.9, (0, 255, 0), 2)
+    return img
 
 
 def visualize_sequence(dataset: str, saliency_dir: str, detections_json: str,
-                       results_dir: str, path_trace, goal, car_heading):
-
+                       results_dir: str, car_states: List[dict] = None,
+                       goal: Tuple[float, float] = None, save_frames: bool = True):
+    """Render saliency + detections (+ optional car simulation states) per frame
+    and write an .avi video. car_states[i] corresponds to the i-th frame and
+    holds window-space {pos, heading, path, reached}."""
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     os.makedirs(results_dir, exist_ok=True)
 
     detections = {}
-    if os.path.exists(detections_json):
+    if detections_json and os.path.exists(detections_json):
         with open(detections_json, 'r') as f:
             detections = json.load(f)
+    else:
+        print(f"[visualize] No detections file at {detections_json} — rendering without boxes.")
 
-    frame_paths = sorted(os.listdir(saliency_dir))
-    if len(frame_paths) == 0:
+    frame_names = sorted(f for f in os.listdir(saliency_dir) if f.endswith(".png"))
+    if not frame_names:
         raise RuntimeError(f"No saliency maps found in {saliency_dir}")
 
-    print(f"🎞 Generating visualization for dataset: {dataset}")
-
-    H, W = 480, 640
+    W, H = WINDOW_W, WINDOW_H
     out_path = os.path.join(results_dir, f"{dataset}_simulation.avi")
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    writer = cv2.VideoWriter(out_path, fourcc, 15, (W, H))
+    writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'XVID'), 5, (W, H))
 
-    for idx, sal_name in enumerate(frame_paths):
+    print(f"Rendering {len(frame_names)} frames for dataset: {dataset}")
+    for idx, sal_name in enumerate(frame_names):
+        stem = os.path.splitext(sal_name)[0]
+        sal, orig_shape = load_saliency(os.path.join(saliency_dir, sal_name), size=(W, H))
 
-        sal_path = os.path.join(saliency_dir, sal_name)
-        rgb_guess = os.path.join("data", dataset, "test", "RGB", sal_name.replace(".png", ".jpg"))
+        rgb_path = os.path.join(root, "data", dataset, "test", "RGB", stem + ".jpg")
+        if os.path.exists(rgb_path):
+            rgb = load_image(rgb_path, size=(W, H))
+        else:
+            rgb = np.zeros((H, W, 3), np.uint8)
 
-        rgb = load_image(rgb_guess, size=(W, H)) if os.path.exists(rgb_guess) else np.zeros((H, W, 3), np.uint8)
-        sal = load_saliency(sal_path, size=(W, H))
-
-        det_list = detections.get(sal_name.split('.')[0], [])
+        det_list = scale_boxes(detections.get(stem, []),
+                               (orig_shape[1], orig_shape[0]), (W, H))
 
         frame = overlay_saliency(rgb, sal)
         frame = draw_detections(frame, det_list)
+        if car_states is not None and idx < len(car_states):
+            frame = draw_car_state(frame, car_states[idx], goal or (W * 0.9, H * 0.15))
 
         writer.write(frame)
-
-        save_bn = f"{dataset}_frame_{idx:03d}.png"
-        print(f"✅ Frame {idx + 1}/{len(frame_paths)} -> {os.path.join(results_dir, save_bn)}")
-
-        cv2.imwrite(os.path.join(results_dir, save_bn), frame)
+        if save_frames:
+            cv2.imwrite(os.path.join(results_dir, f"{dataset}_frame_{idx:03d}.png"), frame)
 
     writer.release()
-    print(f"🎬 Final video saved to: {out_path}")
+    print(f"Video saved to: {out_path}")
+    return out_path

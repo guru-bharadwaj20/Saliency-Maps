@@ -8,12 +8,11 @@ Built using **PyTorch**, **OpenCV**, and the **cmSalGAN saliency model**, this p
 ## 🚀 Features
 
 * **cmSalGAN-based heatmap generation** (RGB + Depth)
-* **Custom Fusion Model** to refine saliency and boost detector performance
-* **Faster R-CNN object detection** on saliency-guided images
-* **Detector training with best-model checkpointing**
-* **Evaluation metrics**: training loss, accuracy, inference time
-* **Autonomous car simulation** using saliency-based focus regions
-* **Frame-by-frame visualization** + final `.avi` simulation video
+* **Custom Fusion Model** (jointly trained with the detector, saved and reloaded with it)
+* **Faster R-CNN object detection** trained on boxes derived from GT saliency masks (connected components → bounding boxes, class `salient_object`)
+* **Real evaluation metrics** — saliency: MAE, adaptive F-measure, S-measure vs. GT masks; detection: AP@0.5, precision/recall/F1; measured inference time
+* **Autonomous car simulation**: potential-field steering (goal attraction + saliency-gradient and detection-box repulsion) over the frame stream
+* **Frame-by-frame visualization** (car, path trace, goal, detections, heatmap overlay) + final `.avi` simulation video
 * **End-to-end modular pipeline** via `main.py`
 * **Supports NJUD, NLPR, and STEREO datasets**
 
@@ -53,30 +52,29 @@ pip install -r requirements.txt
 The updated pipeline consists of the following stages:
 
 ### **1. Saliency Generation (cmSalGAN)**
-- Takes RGB + Depth  
-- Produces heatmaps representing visual attention  
+- Takes RGB + Depth (ImageNet-normalized RGB input)  
+- Produces heatmaps at the original image resolution for both train and test splits  
 
 ### **2. Fusion Module**
-- Inputs: RGB + Heatmap  
-- Outputs: enhanced saliency-guided image  
-- Improves detector accuracy and reduces background noise  
+- Inputs: RGB + Heatmap → 4-channel attention-weighted fusion  
+- Trained jointly with the detector; weights saved in the same checkpoint  
 
 ### **3. Object Detection (Faster R-CNN)**
-- Trained on saliency-guided images  
-- Produces bounding boxes, labels, and confidence scores  
+- Supervision: bounding boxes derived from GT saliency masks via connected components (2 classes: background / salient_object)  
+- Produces bounding boxes, labels, and confidence scores in original image coordinates  
 
 ### **4. Testing & Evaluation**
-- Computes accuracy  
-- Measures inference time  
-- Selects best model based on loss  
+- Saliency: MAE, adaptive F-measure, S-measure against GT masks  
+- Detection: AP@0.5, precision/recall/F1 against GT-derived boxes  
+- Measures real per-image inference time  
+- Saves predictions to `results/detection_outputs/<DATASET>_detections.json`  
 
 ### **5. Simulation**
-- Uses saliency + detections to simulate car movement  
-- Generates frame-by-frame outputs  
+- `CarSimulator` steers a point-mass car per frame using `obstacle_avoidance` (goal attraction + saliency-gradient repulsion + detection repulsion)  
 
 ### **6. Visualization**
-- Draws objects, saliency overlays, and car path  
-- Produces final simulation video  
+- Draws detections, saliency overlays, car, path trace, heading arrow, and goal marker  
+- Produces frame images + final `.avi` simulation video  
 
 ---
 
@@ -90,21 +88,24 @@ python main.py --all --dataset NJUD
 ### Run Individual Stages
 
 ```bash
-# Generate saliency maps
+# 1. Generate saliency maps (requires models/cmSalGAN.ckpt — see downloads below)
 python main.py --saliency --dataset NJUD
 
-# Train the detector
-python main.py --train
+# 2. Train the detector + fusion module (uses the saliency maps from step 1)
+python main.py --train --dataset NJUD
 
-# Test detector performance
-python main.py --test
+# 3. Test detector: saves detections JSON and prints real metrics
+python main.py --test --dataset NJUD
 
-# Run simulation (auto mode)
-python main.py --simulate --dataset NJUD --auto
+# 4. Run the car simulation and render the video
+python main.py --simulate --dataset NJUD
 
-# Visualize results
+# Render saliency/detection overlays without the car
 python main.py --visualize --dataset NJUD
 ```
+
+> Stages depend on each other in that order: `--train`/`--test` expect saliency maps,
+> and `--simulate` gives best results after `--test` has produced detections.
 
 ---
 

@@ -106,33 +106,3 @@ class JPairDataset(data.Dataset):
         s_img = self.normalize(sample['image'])
         s_edge = self.normalize(s_edge)
         return {'image': s_img, 'depth': sample['depth'], 'mask': sample['mask'], 'edge': s_edge, 'edge_gt': s_edge_gt}
-
-
-class CustomDataset(data.Dataset):
-    def __init__(self, root_dir):
-        self.image_rgb_list = sorted(os.listdir(os.path.join(root_dir, 'RGB')))
-        self.transform = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()])
-        self.transformRGB = transforms.Compose([transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
-        self.root_dir = root_dir
-
-    def __len__(self):
-        return len(self.image_rgb_list)
-
-    def __getitem__(self, item):
-        #img_name = '{}/{}'.format(self.root_dir, self.image_rgb_list[item])
-        img_name = self.image_rgb_list[item]
-        img_path_rgb = os.path.join(self.root_dir, 'RGB', self.image_rgb_list[item])
-        img_path_dep = os.path.join(self.root_dir, 'depth', self.image_rgb_list[item])
-        img = Image.open(img_path_rgb)
-        imgsize = img.size
-        img_dep = Image.open(img_path_dep)
-        sample_rgb = img.convert('RGB')
-        # sample_rgb = self.transformRGB(sample_rgb)
-        sample_dep = img_dep.convert('RGB')
-        sample_rgb = self.transform(sample_rgb)
-        sample_rgb = self.transformRGB(sample_rgb)
-        # temppath = './Norm_img/'
-        # os.makedirs(temppath, exist_ok=True)
-        # torchvision.utils.save_image(sample_rgb, os.path.join(temppath, img_name))
-        sample_dep = self.transform(sample_dep)
-        return sample_rgb, sample_dep, img_name, imgsize
