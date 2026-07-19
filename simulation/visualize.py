@@ -1,11 +1,20 @@
-import os
-import cv2
 import json
-import numpy as np
-from typing import List, Tuple
+import os
+import sys
 
-WINDOW_W = 640
-WINDOW_H = 480
+import cv2
+import numpy as np
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from common import get_logger, load_config
+
+log = get_logger(__name__)
+
+WINDOW_W, WINDOW_H = load_config()["simulation"]["window"]
+SCORE_THRESHOLD = load_config()["detection"]["score_threshold"]
 HEATMAP_ALPHA = 0.45
 DETECTION_COLOR = (0, 255, 0)
 CAR_COLOR = (255, 255, 255)
@@ -14,7 +23,7 @@ GOAL_COLOR = (255, 0, 255)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
-def load_image(rgb_path: str, size: Tuple[int, int] = None):
+def load_image(rgb_path: str, size: tuple[int, int] = None):
     img = cv2.imread(rgb_path)
     if img is None:
         raise FileNotFoundError(f"Image not found: {rgb_path}")
@@ -23,7 +32,7 @@ def load_image(rgb_path: str, size: Tuple[int, int] = None):
     return img
 
 
-def load_saliency(sal_path: str, size: Tuple[int, int] = None):
+def load_saliency(sal_path: str, size: tuple[int, int] = None):
     sal = cv2.imread(sal_path, cv2.IMREAD_GRAYSCALE)
     if sal is None:
         raise FileNotFoundError(f"Saliency map not found: {sal_path}")
@@ -34,8 +43,8 @@ def load_saliency(sal_path: str, size: Tuple[int, int] = None):
     return sal, orig_shape
 
 
-def scale_boxes(detections: List[List], src_size: Tuple[int, int],
-                dst_size: Tuple[int, int]):
+def scale_boxes(detections: list[list], src_size: tuple[int, int],
+                dst_size: tuple[int, int]):
     """Scale [x1,y1,x2,y2,score,cls] boxes from src (w, h) to dst (w, h)."""
     sx = dst_size[0] / src_size[0]
     sy = dst_size[1] / src_size[1]
@@ -47,7 +56,7 @@ def overlay_saliency(rgb_img: np.ndarray, saliency: np.ndarray, alpha=HEATMAP_AL
     return cv2.addWeighted(rgb_img, 1 - alpha, heat, alpha, 0)
 
 
-def draw_detections(img: np.ndarray, detections: List[List], score_threshold=0.5):
+def draw_detections(img: np.ndarray, detections: list[list], score_threshold=SCORE_THRESHOLD):
     for det in detections:
         x1, y1, x2, y2, score = det[:5]
         if score < score_threshold:
@@ -58,7 +67,7 @@ def draw_detections(img: np.ndarray, detections: List[List], score_threshold=0.5
     return img
 
 
-def draw_car_state(img: np.ndarray, state: dict, goal: Tuple[float, float]):
+def draw_car_state(img: np.ndarray, state: dict, goal: tuple[float, float]):
     """Draw path trace, car, heading arrow, and goal marker for one frame."""
     path = state.get("path", [])
     if len(path) > 1:
@@ -83,20 +92,20 @@ def draw_car_state(img: np.ndarray, state: dict, goal: Tuple[float, float]):
 
 
 def visualize_sequence(dataset: str, saliency_dir: str, detections_json: str,
-                       results_dir: str, car_states: List[dict] = None,
-                       goal: Tuple[float, float] = None, save_frames: bool = True):
+                       results_dir: str, car_states: list[dict] = None,
+                       goal: tuple[float, float] = None, save_frames: bool = True):
     """Render saliency + detections (+ optional car simulation states) per frame
     and write an .avi video. car_states[i] corresponds to the i-th frame and
     holds window-space {pos, heading, path, reached}."""
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    root = ROOT_DIR
     os.makedirs(results_dir, exist_ok=True)
 
     detections = {}
     if detections_json and os.path.exists(detections_json):
-        with open(detections_json, 'r') as f:
+        with open(detections_json) as f:
             detections = json.load(f)
     else:
-        print(f"[visualize] No detections file at {detections_json} — rendering without boxes.")
+        log.warning("No detections file at %s — rendering without boxes.", detections_json)
 
     frame_names = sorted(f for f in os.listdir(saliency_dir) if f.endswith(".png"))
     if not frame_names:
@@ -106,7 +115,7 @@ def visualize_sequence(dataset: str, saliency_dir: str, detections_json: str,
     out_path = os.path.join(results_dir, f"{dataset}_simulation.avi")
     writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'XVID'), 5, (W, H))
 
-    print(f"Rendering {len(frame_names)} frames for dataset: {dataset}")
+    log.info("Rendering %d frames for dataset: %s", len(frame_names), dataset)
     for idx, sal_name in enumerate(frame_names):
         stem = os.path.splitext(sal_name)[0]
         sal, orig_shape = load_saliency(os.path.join(saliency_dir, sal_name), size=(W, H))
@@ -130,5 +139,5 @@ def visualize_sequence(dataset: str, saliency_dir: str, detections_json: str,
             cv2.imwrite(os.path.join(results_dir, f"{dataset}_frame_{idx:03d}.png"), frame)
 
     writer.release()
-    print(f"Video saved to: {out_path}")
+    log.info("Video saved to: %s", out_path)
     return out_path

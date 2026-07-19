@@ -8,8 +8,8 @@ Author: Guru R Bharadwaj
 Project: Saliency-Aware Autonomous Car
 """
 
-import numpy as np
 import cv2
+import numpy as np
 
 # Constants — tweak for sensitivity
 SAL_THRESHOLD = 0.35    # pixels above this saliency considered risky
@@ -81,7 +81,9 @@ def compute_goal_vector(pos, goal):
     return vec / norm
 
 
-def obstacle_avoidance_control(pos, goal, saliency_map, detections=None):
+def obstacle_avoidance_control(pos, goal, saliency_map, detections=None,
+                               goal_weight=GOAL_WEIGHT, sal_weight=SAL_WEIGHT,
+                               det_weight=DET_WEIGHT, radius=AVOID_RADIUS):
     """
     Main control function for obstacle avoidance.
 
@@ -90,6 +92,8 @@ def obstacle_avoidance_control(pos, goal, saliency_map, detections=None):
         goal: goal position (x, y)
         saliency_map: 2D np.ndarray normalized [0, 1]
         detections: list of detection boxes [x1, y1, x2, y2, score, cls]
+        goal_weight / sal_weight / det_weight: force weights (config-tunable)
+        radius: influence radius for repulsion terms
 
     Returns:
         steering_vector: 2D unit vector indicating movement direction
@@ -98,13 +102,13 @@ def obstacle_avoidance_control(pos, goal, saliency_map, detections=None):
     goal_vec = compute_goal_vector(pos, goal)
 
     # Repulsion from saliency
-    sal_vec = compute_saliency_gradient(saliency_map, pos, radius=AVOID_RADIUS)
+    sal_vec = compute_saliency_gradient(saliency_map, pos, radius=radius)
 
     # Repulsion from detection boxes
-    det_vec = compute_detection_repulsion(detections or [], pos, radius=AVOID_RADIUS)
+    det_vec = compute_detection_repulsion(detections or [], pos, radius=radius)
 
     # Combine forces
-    steer = GOAL_WEIGHT * goal_vec + SAL_WEIGHT * sal_vec + DET_WEIGHT * det_vec
+    steer = goal_weight * goal_vec + sal_weight * sal_vec + det_weight * det_vec
 
     # Normalize
     norm = np.linalg.norm(steer) + 1e-9

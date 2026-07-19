@@ -12,9 +12,9 @@ Detection metrics (predicted boxes vs. ground-truth boxes):
 """
 
 import os
+
 import cv2
 import numpy as np
-
 
 # ---------------------------------------------------------------------------
 # Saliency metrics
@@ -83,7 +83,7 @@ def _s_region(pred, gt):
     cy = min(max(cy, 1), h - 1)
 
     total = h * w
-    score, weights = 0.0, []
+    score = 0.0
     for (y0, y1, x0, x1) in [(0, cy, 0, cx), (0, cy, cx, w), (cy, h, 0, cx), (cy, h, cx, w)]:
         p_q, g_q = pred[y0:y1, x0:x1], gt[y0:y1, x0:x1]
         wgt = p_q.size / total
@@ -161,9 +161,7 @@ def average_precision(preds, gts, iou_threshold=0.5):
     gts:   {image_name: [[x1, y1, x2, y2], ...]}
     """
     all_preds = []
-    total_gt = 0
-    for name, boxes in gts.items():
-        total_gt += len(boxes)
+    total_gt = sum(len(boxes) for boxes in gts.values())
     for name, boxes in preds.items():
         for b in boxes:
             all_preds.append((float(b[4]), name, [float(v) for v in b[:4]]))

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "saliency-aware-driving"
+version = "0.2.0"
+description = "Saliency-aware autonomous driving simulation: cmSalGAN saliency + fusion-guided Faster R-CNN detection + potential-field navigation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Guru R Bharadwaj" }]
+dependencies = [
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "opencv-python>=4.10.0",
+    "pillow>=10.0.0",
+    "numpy>=1.26.4",
+    "tqdm>=4.66.5",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4", "black>=24.0"]
+extras = ["tensorboard>=2.16", "gdown>=5.1"]
+
+[tool.setuptools.packages.find]
+include = ["common*", "datasets*", "detection*", "models*", "saliency_generation*", "simulation*"]
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["models/cmSalGAN_model.py", "models/network_RES.py", "datasets/joint_dataset.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E402",  # sys.path bootstrap before imports is intentional in entry scripts
+    "E741",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: tests that instantiate large models (deselect with '-m \"not slow\"')"]

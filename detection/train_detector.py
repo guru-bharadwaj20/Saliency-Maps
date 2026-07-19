@@ -1,31 +1,34 @@
-import sys, os, time
-from PIL import Image
+import os
+import sys
+import time
+
 import torch
-import torchvision
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, FasterRCNN_ResNet50_FPN_Weights
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 import torch.optim as optim
+import torchvision
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+from torchvision.models.detection.faster_rcnn import (
+    FasterRCNN_ResNet50_FPN_Weights,
+    FastRCNNPredictor,
+)
 from tqdm import tqdm
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from common import dataset_name, get_device, get_logger, load_config, resolve_path, set_seed
+from datasets.saliency_dataset import INPUT_SIZE, CustomDataset
+from detection.annotations import NUM_CLASSES, load_gt_boxes
 from detection.fusion_module import SaliencyFusion
-from detection.annotations import load_gt_boxes, NUM_CLASSES
-from datasets.saliency_dataset import CustomDataset, INPUT_SIZE
 
-DATASET_NAME = os.environ.get("DATASETS", "NJUD").split(",")[0]
-BASE_DATA_PATH = os.path.join(ROOT_DIR, "data")
-PRECOMPUTED_SAL_PATH = os.path.join(ROOT_DIR, "results", "saliency_maps", DATASET_NAME)
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = 2
-NUM_EPOCHS = 3
-LR = 1e-4
-NUM_WORKERS = 0
-SAVE_DIR = os.path.join(ROOT_DIR, "models", "checkpoints")
-BEST_MODEL_PATH = os.path.join(ROOT_DIR, "models", "detector_best.pt")
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
+
+log = get_logger(__name__)
 
 
 class FusedDetectionDataset(Dataset):
@@ -57,9 +60,9 @@ class FusedDetectionDataset(Dataset):
             sal = transforms.Resize(rgb.shape[1:])(sal)
         else:
             if not self._warned_missing_sal:
-                print(f"[train] WARNING: no precomputed saliency map for {stem} "
-                      f"(looked in {self.saliency_dir}); using zeros. "
-                      "Run `python main.py --saliency` first for real fusion input.")
+                log.warning("No precomputed saliency map for %s (looked in %s); "
+                            "using zeros. Run `python main.py --saliency` first "
+                            "for real fusion input.", stem, self.saliency_dir)
                 self._warned_missing_sal = True
             sal = torch.zeros((1, rgb.shape[1], rgb.shape[2]))
 
@@ -75,12 +78,12 @@ class FusedDetectionDataset(Dataset):
         return rgb, sal, target, stem
 
 
-def get_fasterrcnn_model(num_classes):
+def get_fasterrcnn_model(num_classes, device):
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(
         weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    return model.to(DEVICE)
+    return model.to(device)
 
 
 def collate_fn(batch):
@@ -92,52 +95,80 @@ def collate_fn(batch):
 
 
 def train():
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    dataset = FusedDetectionDataset(
-        root_dir=os.path.join(BASE_DATA_PATH, DATASET_NAME),
-        split="train",
-        saliency_dir=PRECOMPUTED_SAL_PATH)
-    n_annotated = sum(1 for i in range(len(dataset)) if len(dataset[i][2]["boxes"]) > 0)
-    print(f"Dataset: {DATASET_NAME}/train — {len(dataset)} images, "
-          f"{n_annotated} with GT-derived boxes")
-    if n_annotated == 0:
-        raise RuntimeError(
-            "No ground-truth boxes could be derived from GT masks — "
-            f"check that {os.path.join(BASE_DATA_PATH, DATASET_NAME, 'train', 'GT')} "
-            "contains binary saliency masks.")
+    cfg = load_config()
+    seed = set_seed(cfg["seed"])
+    device = get_device(cfg)
+    ds_name = dataset_name(cfg)
+    tcfg = cfg["training"]
 
-    data_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True,
-                             num_workers=NUM_WORKERS, collate_fn=collate_fn)
-    model = get_fasterrcnn_model(NUM_CLASSES)
+    save_dir = resolve_path("checkpoints", cfg)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    best_model_path = resolve_path("detector_best", cfg)
+    saliency_dir = resolve_path("saliency_maps", cfg) / ds_name
+
+    dataset = FusedDetectionDataset(
+        root_dir=str(resolve_path("data", cfg) / ds_name),
+        split="train",
+        saliency_dir=str(saliency_dir))
+    n_annotated = sum(1 for i in range(len(dataset)) if len(dataset[i][2]["boxes"]) > 0)
+    log.info("Dataset: %s/train — %d images, %d with GT-derived boxes (seed=%d, device=%s)",
+             ds_name, len(dataset), n_annotated, seed, device)
+    if n_annotated == 0:
+        gt_dir = resolve_path('data', cfg) / ds_name / 'train' / 'GT'
+        raise RuntimeError(
+            "No ground-truth boxes could be derived from GT masks — check that "
+            f"{gt_dir} contains binary saliency masks.")
+
+    data_loader = DataLoader(dataset, batch_size=tcfg["batch_size"], shuffle=True,
+                             num_workers=tcfg["num_workers"], collate_fn=collate_fn)
+    model = get_fasterrcnn_model(NUM_CLASSES, device)
     model.train()
-    fusion = SaliencyFusion(use_attention=True).to(DEVICE)
+    fusion = SaliencyFusion(use_attention=True).to(device)
     fusion.train()
     params = [p for p in model.parameters() if p.requires_grad] + list(fusion.parameters())
-    optimizer = optim.Adam(params, lr=LR)
+    optimizer = optim.Adam(params, lr=tcfg["lr"])
+
+    writer = None
+    if SummaryWriter is not None:
+        tb_dir = resolve_path("tensorboard", cfg) / time.strftime(f"{ds_name}_%Y%m%d_%H%M%S")
+        writer = SummaryWriter(log_dir=str(tb_dir))
+        log.info("TensorBoard logs: %s (view with `tensorboard --logdir %s`)",
+                 tb_dir, resolve_path("tensorboard", cfg))
+    else:
+        log.info("tensorboard not installed — skipping loss curves "
+                 "(pip install tensorboard to enable).")
 
     best_loss = float("inf")
     best_epoch = -1
-    print(f"Starting training on {DEVICE}...")
-    for epoch in range(NUM_EPOCHS):
+    global_step = 0
+    log.info("Starting training: %d epochs, batch %d, lr %g",
+             tcfg["epochs"], tcfg["batch_size"], tcfg["lr"])
+    for epoch in range(tcfg["epochs"]):
         epoch_loss = 0.0
         start_time = time.time()
         pbar = tqdm(data_loader)
-        for rgbs, sals, targets, names in pbar:
-            rgbs, sals = rgbs.to(DEVICE), sals.to(DEVICE)
+        for rgbs, sals, targets, _names in pbar:
+            rgbs, sals = rgbs.to(device), sals.to(device)
             fused = fusion(rgbs, sals)
-            tv_targets = [{"boxes": t["boxes"].to(DEVICE),
-                           "labels": t["labels"].to(DEVICE)} for t in targets]
+            tv_targets = [{"boxes": t["boxes"].to(device),
+                           "labels": t["labels"].to(device)} for t in targets]
             losses = model(list(fused), tv_targets)
             loss = sum(losses.values()) if isinstance(losses, dict) else losses
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
-            pbar.set_description(f"Epoch {epoch + 1}/{NUM_EPOCHS} Loss: {loss.item():.4f}")
+            step_loss = loss.item()
+            epoch_loss += step_loss
+            if writer:
+                writer.add_scalar("train/loss_step", step_loss, global_step)
+            global_step += 1
+            pbar.set_description(f"Epoch {epoch + 1}/{tcfg['epochs']} Loss: {step_loss:.4f}")
 
         avg_loss = epoch_loss / len(data_loader)
         elapsed = time.time() - start_time
-        print(f"Epoch {epoch + 1} — avg loss: {avg_loss:.4f} — time: {elapsed:.1f}s")
+        if writer:
+            writer.add_scalar("train/loss_epoch", avg_loss, epoch + 1)
+        log.info("Epoch %d — avg loss: %.4f — time: %.1fs", epoch + 1, avg_loss, elapsed)
 
         checkpoint = {
             "detector": model.state_dict(),
@@ -145,17 +176,19 @@ def train():
             "epoch": epoch + 1,
             "avg_loss": avg_loss,
             "num_classes": NUM_CLASSES,
+            "seed": seed,
         }
-        ckpt_path = os.path.join(SAVE_DIR, f"detector_epoch_{epoch + 1}.pth")
-        torch.save(checkpoint, ckpt_path)
+        torch.save(checkpoint, save_dir / f"detector_epoch_{epoch + 1}.pth")
         if avg_loss < best_loss:
             best_loss = avg_loss
             best_epoch = epoch + 1
-            torch.save(checkpoint, BEST_MODEL_PATH)
-            print(f"Best model updated (Epoch {best_epoch}, Loss {best_loss:.4f})")
+            torch.save(checkpoint, best_model_path)
+            log.info("Best model updated (Epoch %d, Loss %.4f)", best_epoch, best_loss)
 
-    print(f"Training finished — Best model: Epoch {best_epoch} | Loss: {best_loss:.4f}")
-    print(f"Saved to {BEST_MODEL_PATH} (contains detector + fusion weights)")
+    if writer:
+        writer.close()
+    log.info("Training finished — Best model: Epoch %d | Loss: %.4f", best_epoch, best_loss)
+    log.info("Saved to %s (contains detector + fusion weights)", best_model_path)
 
 
 if __name__ == "__main__":

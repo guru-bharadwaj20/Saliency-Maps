@@ -4,12 +4,14 @@ Treats the test set's saliency maps as a stream of scene observations: for
 each frame the car takes several control steps steered by
 obstacle_avoidance (goal attraction + saliency-gradient repulsion +
 detection-box repulsion), and the resulting state is rendered by
-simulation.visualize.
+simulation.visualize. All tunables live under `simulation:` in config.yaml.
 """
 
-import sys, os
 import glob
 import json
+import os
+import sys
+
 import cv2
 import numpy as np
 
@@ -17,20 +19,26 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from common import get_logger, load_config, resolve_path, set_seed
 from simulation.obstacle_avoidance import obstacle_avoidance_control
-from simulation.visualize import visualize_sequence, scale_boxes, WINDOW_W, WINDOW_H
+from simulation.visualize import scale_boxes, visualize_sequence
 
-STEP_SIZE = 5.0
-STEPS_PER_FRAME = 15
-GOAL_RADIUS = 12
-SMOOTHING = 0.8
+log = get_logger(__name__)
 
 
 class CarSimulator:
     """Point-mass car steered by obstacle_avoidance_control in window space."""
 
-    def __init__(self, start=None, goal=None, window=(WINDOW_W, WINDOW_H)):
-        self.W, self.H = window
+    def __init__(self, start=None, goal=None, cfg=None):
+        scfg = (cfg or load_config())["simulation"]
+        self.W, self.H = scfg["window"]
+        self.step_size = scfg["step_size"]
+        self.steps_per_frame = scfg["steps_per_frame"]
+        self.goal_radius = scfg["goal_radius"]
+        self.smoothing = scfg["smoothing"]
+        self.weights = {"goal_weight": scfg["goal_weight"],
+                        "sal_weight": scfg["saliency_weight"],
+                        "det_weight": scfg["detection_weight"]}
         self.start = start or (self.W * 0.08, self.H * 0.9)
         self.goal = goal or (self.W * 0.9, self.H * 0.12)
         self.pos = np.array(self.start, dtype=np.float32)
@@ -38,19 +46,20 @@ class CarSimulator:
         self.path = [tuple(self.pos)]
 
     def goal_reached(self):
-        return np.linalg.norm(self.pos - np.array(self.goal)) <= GOAL_RADIUS
+        return np.linalg.norm(self.pos - np.array(self.goal)) <= self.goal_radius
 
-    def update(self, sal_map, detections, steps=STEPS_PER_FRAME):
+    def update(self, sal_map, detections, steps=None):
         """Advance the car through one observed frame."""
-        for _ in range(steps):
+        for _ in range(steps or self.steps_per_frame):
             if self.goal_reached():
                 break
-            steer = obstacle_avoidance_control(self.pos, self.goal, sal_map, detections)
-            self.heading = SMOOTHING * self.heading + (1 - SMOOTHING) * steer
+            steer = obstacle_avoidance_control(self.pos, self.goal, sal_map,
+                                               detections, **self.weights)
+            self.heading = self.smoothing * self.heading + (1 - self.smoothing) * steer
             norm = np.linalg.norm(self.heading)
             if norm > 1e-6:
                 self.heading = self.heading / norm
-            self.pos = self.pos + self.heading * STEP_SIZE
+            self.pos = self.pos + self.heading * self.step_size
             self.pos[0] = float(np.clip(self.pos[0], 0, self.W - 1))
             self.pos[1] = float(np.clip(self.pos[1], 0, self.H - 1))
             self.path.append((float(self.pos[0]), float(self.pos[1])))
@@ -66,26 +75,29 @@ class CarSimulator:
 
 def run_car_simulation(dataset="NJUD", detections_json=None, goal=None):
     """Run the simulation over every saliency frame and render the video."""
-    print(f"\n[CarSimulator] Running simulation for dataset: {dataset}")
-    saliency_dir = os.path.join(ROOT_DIR, "results", "saliency_maps", dataset)
-    detections_json = detections_json or os.path.join(
-        ROOT_DIR, "results", "detection_outputs", f"{dataset}_detections.json")
-    results_dir = os.path.join(ROOT_DIR, "results", "simulation_outputs", dataset)
-    os.makedirs(results_dir, exist_ok=True)
+    cfg = load_config()
+    set_seed(cfg["seed"])
+    window = tuple(cfg["simulation"]["window"])
+    log.info("Running simulation for dataset: %s", dataset)
+    saliency_dir = resolve_path("saliency_maps", cfg) / dataset
+    detections_json = detections_json or str(
+        resolve_path("detection_outputs", cfg) / f"{dataset}_detections.json")
+    results_dir = resolve_path("simulation_outputs", cfg) / dataset
+    results_dir.mkdir(parents=True, exist_ok=True)
 
-    sal_files = sorted(glob.glob(os.path.join(saliency_dir, "*.png")))
+    sal_files = sorted(glob.glob(os.path.join(str(saliency_dir), "*.png")))
     if not sal_files:
         raise RuntimeError(
             f"No saliency maps found in {saliency_dir}. Run `python main.py --saliency` first.")
 
     detections = {}
     if os.path.exists(detections_json):
-        with open(detections_json, "r") as f:
+        with open(detections_json) as f:
             detections = json.load(f)
     else:
-        print(f"[CarSimulator] No detections at {detections_json} — steering on saliency only.")
+        log.warning("No detections at %s — steering on saliency only.", detections_json)
 
-    sim = CarSimulator(goal=goal)
+    sim = CarSimulator(goal=goal, cfg=cfg)
     car_states = []
     for sal_path in sal_files:
         stem = os.path.splitext(os.path.basename(sal_path))[0]
@@ -93,25 +105,24 @@ def run_car_simulation(dataset="NJUD", detections_json=None, goal=None):
         if sal is None:
             continue
         orig_h, orig_w = sal.shape
-        sal_win = cv2.resize(sal.astype(np.float32) / 255.0, (WINDOW_W, WINDOW_H))
-        dets_win = scale_boxes(detections.get(stem, []),
-                               (orig_w, orig_h), (WINDOW_W, WINDOW_H))
+        sal_win = cv2.resize(sal.astype(np.float32) / 255.0, window)
+        dets_win = scale_boxes(detections.get(stem, []), (orig_w, orig_h), window)
         sim.update(sal_win, dets_win)
         car_states.append(sim.state())
 
     reached = car_states[-1]["reached"] if car_states else False
-    print(f"[CarSimulator] {len(car_states)} frames simulated | "
-          f"path length: {len(sim.path)} steps | goal reached: {reached}")
+    log.info("%d frames simulated | path length: %d steps | goal reached: %s",
+             len(car_states), len(sim.path), reached)
 
     out_path = visualize_sequence(
         dataset=dataset,
-        saliency_dir=saliency_dir,
+        saliency_dir=str(saliency_dir),
         detections_json=detections_json,
-        results_dir=results_dir,
+        results_dir=str(results_dir),
         car_states=car_states,
         goal=sim.goal,
     )
-    print(f"[CarSimulator] Simulation video: {out_path}")
+    log.info("Simulation video: %s", out_path)
     return car_states
 
 

@@ -1,0 +1,43 @@
+# Saliency-Aware Autonomous Driving — pipeline configuration.
+# Every value here has a built-in default (common/config.py); delete a key to
+# fall back to it. Override the dataset per-run with: python main.py --dataset NLPR
+
+dataset: NJUD
+device: auto            # auto | cpu | cuda
+seed: 42
+
+paths:
+  data: data
+  results: results
+  saliency_maps: results/saliency_maps
+  detection_outputs: results/detection_outputs
+  simulation_outputs: results/simulation_outputs
+  tensorboard: results/tensorboard
+  cmsalgan_ckpt: models/cmSalGAN.ckpt
+  detector_best: models/detector_best.pt
+  checkpoints: models/checkpoints
+
+saliency:
+  input_size: 224       # model input resolution (cmSalGAN + detector)
+  batch_size: 1
+
+training:
+  batch_size: 2
+  epochs: 3
+  lr: 1.0e-4
+  num_workers: 0        # keep 0 on Windows
+
+detection:
+  score_threshold: 0.5        # min confidence for drawing / P-R-F1
+  iou_threshold: 0.5          # IoU for AP and matching
+  min_box_area_fraction: 0.001  # GT-mask components smaller than this are dropped
+
+simulation:
+  window: [640, 480]    # render/steering space (w, h)
+  step_size: 5.0        # px per control step
+  steps_per_frame: 15   # control steps per observed frame
+  goal_radius: 12       # px tolerance to declare goal reached
+  smoothing: 0.8        # heading momentum (0 = twitchy, 1 = frozen)
+  goal_weight: 1.0      # attraction toward goal
+  saliency_weight: 2.2  # repulsion from salient regions
+  detection_weight: 3.5 # repulsion from detection boxes

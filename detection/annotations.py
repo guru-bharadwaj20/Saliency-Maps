@@ -7,13 +7,16 @@ of the binarized mask; every component becomes one box with class label 1
 """
 
 import os
+
 import cv2
 import numpy as np
+
+from common.config import load_config
 
 CLASS_NAMES = ["__background__", "salient_object"]
 NUM_CLASSES = len(CLASS_NAMES)
 
-MIN_AREA_FRACTION = 0.001   # drop components smaller than 0.1% of the image
+MIN_AREA_FRACTION = load_config()["detection"]["min_box_area_fraction"]
 BINARIZE_THRESHOLD = 128
 
 

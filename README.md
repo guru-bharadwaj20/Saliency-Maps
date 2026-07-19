@@ -20,11 +20,12 @@ Built using **PyTorch**, **OpenCV**, and the **cmSalGAN saliency model**, this p
 
 ## 📦 Tech Stack
 
-* **Framework** → PyTorch  
-* **Computer Vision** → OpenCV, NumPy  
-* **Visualization** → OpenCV Rendering  
-* **Automation** → tqdm, argparse, JSON  
-* **Language** → Python 3.12  
+* **Framework** → PyTorch, TorchVision  
+* **Computer Vision** → OpenCV, NumPy, Pillow  
+* **Visualization** → OpenCV rendering, TensorBoard (optional)  
+* **Config & CLI** → YAML config (`config.yaml`), argparse  
+* **Quality** → pytest, ruff, GitHub Actions CI  
+* **Language** → Python 3.10+  
 * **Environment** → Google Colab / Linux / Windows  
 
 ---
@@ -41,9 +42,23 @@ cd saliency-aware-autonomous-driving
 ### 2. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt        # runtime only
+pip install -r requirements-dev.txt    # + pytest, ruff, black (for development)
 ```
-> 💡 `Ensure PyTorch and OpenCV are installed properly before running.`
+> 💡 Optional extras: `pip install tensorboard` (training loss curves) and `pip install gdown` (automatic downloads).
+
+### 3. Download the pretrained cmSalGAN checkpoint
+
+```bash
+python scripts/download_data.py --what model     # → models/cmSalGAN.ckpt
+python scripts/download_data.py --what dataset   # full training dataset (zip)
+```
+
+### 4. Configure (optional)
+
+All paths and hyperparameters live in [config.yaml](config.yaml) — dataset, device,
+seed, training batch size / epochs / lr, detection thresholds, and every simulation
+steering weight. Any key you delete falls back to a built-in default.
 
 ---
 
@@ -128,20 +143,39 @@ python main.py --visualize --dataset NJUD
 ```bash
 saliency-aware-autonomous-driving/
 │
+├── common/                      # Config loader, logging, seeding (shared)
 ├── data/                        # Input datasets (NJUD, NLPR, STEREO)
-├── models/                      # cmSalGAN + detector model checkpoints
-│   └── checkpoints/             # Best detector models
+├── datasets/                    # PyTorch dataset classes
+├── detection/                   # Fusion model, GT→box annotations, train/test, metrics
+├── models/                      # cmSalGAN model code + checkpoints
+│   └── checkpoints/             # Per-epoch detector checkpoints
 ├── results/                     # Auto-generated outputs
-│   ├── saliency_maps/           # Generated heatmaps
-│   ├── detection_outputs/       # Inference predictions
-│   └── simulation_outputs/      # Frames + final simulation video
-├── detection/                   # Fusion model + detector training/testing/metrics
-├── saliency_generation/         # cmSalGAN saliency generation scripts
-├── simulation/                  # Custom car simulator + visualizer
+│   ├── saliency_maps/           # Generated heatmaps (original resolution)
+│   ├── detection_outputs/       # Prediction images + <DATASET>_detections.json
+│   ├── simulation_outputs/      # Frames + final simulation video
+│   └── tensorboard/             # Training loss curves (if tensorboard installed)
+├── saliency_generation/         # cmSalGAN saliency generation
+├── simulation/                  # Car simulator, obstacle avoidance, visualizer
+├── scripts/                     # download_data.py (gdown)
+├── tests/                       # pytest suite (run: pytest -m "not slow")
+├── config.yaml                  # All paths & hyperparameters
 ├── main.py                      # Pipeline orchestrator
-├── requirements.txt             # Package dependencies
-└── README.md                    # Documentation
+├── pyproject.toml               # Packaging + ruff/black/pytest config
+├── requirements.txt             # Runtime dependencies
+└── requirements-dev.txt         # Dev dependencies (pytest, ruff, black)
 ```
+
+---
+
+## 🧪 Testing & Quality
+
+```bash
+pytest -m "not slow"   # fast unit suite (metrics, datasets, fusion, simulation, config)
+pytest -m slow         # + one full training step through the real pipeline
+ruff check .           # lint
+```
+
+CI (GitHub Actions) runs the lint + fast suite on every push and pull request.
 
 ---
 

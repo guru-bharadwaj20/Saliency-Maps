@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
 
 class SaliencyFusion(nn.Module):
     """
@@ -10,7 +10,7 @@ class SaliencyFusion(nn.Module):
     """
 
     def __init__(self, use_attention=True):
-        super(SaliencyFusion, self).__init__()
+        super().__init__()
         self.use_attention = use_attention
 
         # Small convolutional refinement layers

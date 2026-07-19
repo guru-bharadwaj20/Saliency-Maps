@@ -25,6 +25,14 @@ models/*.pt
 models/*.pth
 models/*.ckpt
 
+downloads/
+results/tensorboard/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
 !models/*.py
 
 notebooks/

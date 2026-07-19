@@ -17,12 +17,15 @@ The detector / fusion path consumes the raw [0, 1] tensor directly
 """
 
 import os
-import torch
-from torch.utils.data import Dataset
-from PIL import Image
-import torchvision.transforms as T
 
-INPUT_SIZE = 224
+import torch
+import torchvision.transforms as T
+from PIL import Image
+from torch.utils.data import Dataset
+
+from common.config import load_config
+
+INPUT_SIZE = load_config()["saliency"]["input_size"]
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
