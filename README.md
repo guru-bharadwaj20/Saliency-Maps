@@ -1,9 +1,18 @@
 # Saliency-Aware Autonomous Driving
 
-An end-to-end vision pipeline that combines **RGB-D saliency detection** (cmSalGAN),
-**saliency-guided fusion**, **Faster R-CNN object detection**, and **potential-field
-navigation** into a single system. It runs on the bundled RGB-D dataset and, via
-monocular depth estimation, on any ordinary photo. Built with PyTorch and OpenCV.
+**An end-to-end vision pipeline — RGB-D saliency, saliency-guided fusion, Faster R-CNN detection and potential-field navigation — with an ablation that reports where the idea does not pay.**
+
+[![CI](https://img.shields.io/badge/CI-ruff_+_pytest-2ea44f?logo=githubactions&logoColor=white)](.github/workflows)
+[![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![PyTorch](https://img.shields.io/badge/PyTorch-Faster_R--CNN-EE4C2C?logo=pytorch&logoColor=white)](saliency_driving/train.py)
+[![OpenCV](https://img.shields.io/badge/OpenCV-simulation-5C3EE8?logo=opencv&logoColor=white)](saliency_driving/simulation)
+[![Gradio](https://img.shields.io/badge/demo-Gradio-F97316)](app.py)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+cmSalGAN turns RGB + depth into a saliency heatmap, a fusion module feeds RGB and
+saliency to a Faster R-CNN detector, and a simulated car steers through the scene
+by potential-field control. It runs on the bundled RGB-D sample and, through
+MiDaS monocular depth, on any ordinary photo.
 
 <p align="center">
   <img src="docs/demo.gif" alt="Saliency-driven car simulation" width="480"><br>
@@ -11,127 +20,242 @@ monocular depth estimation, on any ordinary photo. Built with PyTorch and OpenCV
   path trace (orange), and goal (magenta). <code>python main.py --simulate</code></em>
 </p>
 
-## Highlights
+---
 
-- **cmSalGAN saliency** from RGB + depth, saved at original resolution.
-- **Fusion module** (attention-weighted RGB + saliency) trained jointly with the detector and reloaded from the same checkpoint.
-- **Detector supervision without box labels** — bounding boxes are derived from the ground-truth saliency masks via connected components.
-- **Real metrics**, not placeholders — saliency: MAE / F-measure / S-measure; detection: AP@0.5, precision / recall / F1; measured inference time.
-- **Ablation harness** that trains baseline / fusion / attention variants under identical seeds and reports a comparison table.
-- **Runs on any image** — MiDaS monocular depth removes the RGB-D requirement (`main.py --infer photo.jpg`); a Gradio web demo (`app.py`) is deployable to Hugging Face Spaces.
-- **Explainability** — fusion attention maps and EigenCAM visualizations of the detector backbone.
-- Config-driven (`config.yaml`), logged, seeded, tested (`pytest`), and linted (`ruff`) with CI.
+## Contents
 
-## Quickstart
+| Section | |
+|---|---|
+| [What it does](#what-it-does) | The pipeline and its tooling, by area |
+| [Architecture](#architecture) | Saliency, fusion, detection, evaluation, simulation |
+| [How a frame is processed](#how-a-frame-is-processed) | Image in, steering out |
+| [Quick start](#quick-start) | Install, run a stage, run on a photo |
+| [Results](#results) | Saliency metrics and the detection ablation |
+| [Project status](#project-status) | What CI proves, and the next steps |
+| [Design decisions](#design-decisions) | The tradeoffs, and why |
+| [Repository layout](#repository-layout) | Where things live |
+| [Documentation](#documentation) | Which file answers which question |
+| [Team](#team) | Who built it |
 
-```bash
-git clone https://github.com/guru-bharadwaj20/saliency-aware-autonomous-driving.git
-cd saliency-aware-autonomous-driving
-pip install -r requirements.txt          # runtime
-pip install -r requirements-dev.txt      # + pytest, ruff, black
+---
+
+## What it does
+
+| Area | Capabilities |
+|---|---|
+| **Saliency** | cmSalGAN from RGB + depth, saved at original resolution; a labelled spectral-residual fallback without the checkpoint |
+| **Depth** | MiDaS monocular depth, so any photo works (`main.py --infer photo.jpg`) |
+| **Fusion** | Attention-weighted RGB + saliency into a 3-channel detector input, trained jointly with the detector |
+| **Detection** | Faster R-CNN over background / `salient_object`, supervised by boxes derived from ground-truth saliency masks |
+| **Metrics** | Saliency MAE, F-measure, S-measure; detection AP@0.5, precision, recall, F1; measured inference time |
+| **Ablation** | Baseline, plain fusion and attention fusion trained under identical seeds, with a comparison table |
+| **Explainability** | Fusion attention maps and EigenCAM over the detector backbone |
+| **Simulation** | A point-mass car steered per frame by goal attraction and saliency/detection repulsion, rendered to video |
+| **Demo** | A Gradio app deployable to Hugging Face Spaces |
+
+---
+
+## Architecture
+
+```mermaid
+graph LR
+    subgraph input["Input"]
+        RGB["RGB image"]
+        D["Depth<br/>NJUD or MiDaS"]
+    end
+
+    SAL["cmSalGAN<br/>saliency heatmap"]
+    FUSE["Fusion module<br/>attention-weighted RGB + saliency"]
+    DET["Faster R-CNN<br/>salient_object boxes"]
+    EVAL["Metrics<br/>MAE · F · S · AP@0.5"]
+    SIM["Potential-field simulator<br/>attraction + repulsion"]
+    OUT["results/<br/>maps · detections · video"]
+
+    RGB --> SAL
+    D --> SAL
+    RGB --> FUSE
+    SAL --> FUSE --> DET
+    DET --> EVAL --> OUT
+    SAL --> SIM
+    DET --> SIM --> OUT
 ```
 
-Run the full pipeline on the bundled NJUD sample, or any single stage:
+Everything is driven by `config.yaml`, logged and seeded.
 
-```bash
-python main.py --all                     # saliency → train → test → simulate
-python main.py --saliency                # generate saliency maps (needs cmSalGAN ckpt)
-python main.py --train                   # train detector + fusion
-python main.py --test                    # inference + metrics + predictions JSON
-python main.py --simulate                # car simulation + .avi video
+---
+
+## How a frame is processed
+
+```mermaid
+sequenceDiagram
+    participant I as Image
+    participant M as MiDaS (photo only)
+    participant S as cmSalGAN
+    participant F as Fusion
+    participant R as Faster R-CNN
+    participant C as Car controller
+
+    I->>M: no depth? estimate it
+    M-->>S: depth map
+    I->>S: ImageNet-normalised RGB + depth
+    S-->>F: saliency, restored to native resolution
+    I->>F: RGB
+    F->>R: 3-channel attention-weighted input
+    R-->>C: salient_object boxes
+    S-->>C: saliency gradient
+    C->>C: goal attraction − saliency repulsion − detection repulsion
+    C-->>I: next position, drawn with heatmap, boxes and path
 ```
 
-Run on your own image (no RGB-D data needed):
+---
+
+## Quick start
+
+> The pretrained cmSalGAN checkpoint and the full dataset come from
+> `python scripts/download_data.py --what model|dataset` (needs `gdown`).
 
 ```bash
-pip install timm                         # MiDaS monocular depth
-python main.py --infer path/to/photo.jpg # → results/single/
+# 1 — install
+git clone https://github.com/guru-bharadwaj20/Saliency-Maps.git && cd Saliency-Maps
+pip install -r requirements.txt            # runtime
+pip install -r requirements-dev.txt        # + pytest, ruff, black
+
+# 2 — the whole pipeline on the bundled NJUD sample, or one stage at a time
+python main.py --all                       # saliency → train → test → simulate
+python main.py --saliency | --train | --test | --simulate
+
+# 3 — any photo, no RGB-D needed
+pip install timm
+python main.py --infer path/to/photo.jpg   # → results/single/
+
+# 4 — the web demo
+pip install gradio timm && python app.py   # http://127.0.0.1:7860
 ```
 
-Interactive web demo:
-
-```bash
-pip install gradio timm
-python app.py                            # http://127.0.0.1:7860
-```
-
-See [docs/DEPLOY_HF_SPACES.md](docs/DEPLOY_HF_SPACES.md) to publish the demo.
-The pretrained cmSalGAN checkpoint and full dataset are fetched with
-`python scripts/download_data.py --what model|dataset` (requires `gdown`);
-without the checkpoint, saliency falls back to a labeled spectral-residual method.
-
-## Pipeline
-
-1. **Saliency** — cmSalGAN maps RGB + depth to a heatmap (ImageNet-normalized input, restored to native resolution).
-2. **Fusion** — RGB and saliency are fused into a 3-channel, attention-weighted detector input.
-3. **Detection** — Faster R-CNN over two classes (background / `salient_object`), supervised by GT-mask-derived boxes.
-4. **Evaluation** — saliency and detection metrics against ground truth; predictions saved to `results/detection_outputs/`.
-5. **Simulation** — a point-mass car is steered per frame by potential-field control (goal attraction + saliency-gradient and detection repulsion) and rendered to a video.
+---
 
 ## Results
 
-Measured on the bundled 10-image NJUD sample (CPU, seed 42) — honest small-sample
-numbers, not benchmarks.
+Measured on the bundled 10-image NJUD sample (CPU, seed 42) — honest
+small-sample numbers, not benchmarks.
 
-**Saliency** (cmSalGAN maps vs. GT masks): MAE **0.265**, F-measure **0.554**, S-measure **0.630**.
+**Saliency** (cmSalGAN vs ground-truth masks): MAE **0.265**, F-measure
+**0.554**, S-measure **0.630**.
 
 **Detection ablation** (`python scripts/run_ablation.py`) — same COCO-pretrained
-Faster R-CNN, 3 epochs, identical seed. "Oracle" uses the GT mask as saliency input
-to isolate the fusion architecture from cmSalGAN's prediction quality.
+Faster R-CNN, 3 epochs, identical seed. "Oracle" feeds the ground-truth mask as
+saliency, to isolate the fusion architecture from cmSalGAN's quality.
 
 | Variant | Fusion | Saliency input | AP@0.5 | Precision | Recall | F1 |
-|---|---|---|---|---|---|---|
+|---|---|---|---:|---:|---:|---:|
 | **baseline_no_fusion** | none | — | **0.584** | 0.389 | **0.700** | **0.500** |
 | fusion_plain | conv only | oracle (GT) | 0.300 | 0.385 | 0.500 | 0.435 |
 | fusion_attention | conv + attention | oracle (GT) | 0.393 | 0.182 | 0.600 | 0.279 |
 | fusion_attention | conv + attention | cmSalGAN maps | 0.309 | 0.147 | 0.500 | 0.227 |
 
-At this scale the raw-RGB baseline wins: the randomly-initialized fusion frontend
-disrupts the input statistics the pretrained backbone expects, and 10 images × 3
-epochs is far too little to recover. The harness makes the natural follow-ups
-one-liners (full dataset, identity-initialized fusion, longer schedules):
-`python scripts/run_ablation.py --epochs N --saliency-source precomputed`.
-
-**Explainability** (`python scripts/make_explainability.py`) makes this visible — the
-baseline's EigenCAM focuses on the salient objects, while the fusion module's learned
-attention stays nearly uniform and its EigenCAM drifts to the image borders.
+**At this scale the raw-RGB baseline wins.** The randomly initialised fusion
+front end disrupts the input statistics the pretrained backbone expects, and
+10 images × 3 epochs is far too little to recover. Explainability makes it
+visible: the baseline's EigenCAM focuses on the salient objects, while the fusion
+module's attention stays nearly uniform and its EigenCAM drifts to the borders.
 
 <p align="center">
   <img src="docs/explainability.png" alt="Explainability grid" width="720">
 </p>
 
-## Project structure
+---
+
+## Project status
+
+The pipeline, ablation harness, explainability and demo are complete. The
+natural follow-ups are one-liners in the harness:
+`python scripts/run_ablation.py --epochs N --saliency-source precomputed`.
+
+| Next | Why |
+|---|---|
+| The full NJUD dataset | 10 images cannot separate the variants |
+| Identity-initialised fusion | Start from the baseline's input statistics instead of disrupting them |
+| Longer schedules | Give the fusion front end time to learn |
+
+### What CI proves on every push
+
+| Step | Proves |
+|---|---|
+| `ruff check .` | Lint is clean |
+| `pytest -m "not slow"` | Metrics, datasets, fusion, simulation and config units pass |
+
+`pytest -m slow` additionally runs one full training step through the real
+pipeline.
+
+---
+
+## Design decisions
+
+**Boxes from masks.** The dataset has saliency masks, not boxes, so detector
+supervision comes from connected components of the ground-truth masks — no extra
+labelling.
+
+**An oracle row in the ablation.** Feeding ground-truth saliency separates "the
+fusion design is wrong" from "the saliency predictor is weak". Here the fusion
+design loses even with perfect saliency.
+
+**Report the negative result.** The baseline beats every fusion variant at this
+scale, and the README leads with that rather than with the variant that was
+expected to win.
+
+**One checkpoint, two modules.** The fusion module is trained jointly with the
+detector and reloaded from the same checkpoint, so inference cannot pair
+mismatched weights.
+
+**Depth should not be a prerequisite.** MiDaS removes the RGB-D requirement, and
+without a cmSalGAN checkpoint the saliency stage falls back to a clearly labelled
+spectral-residual method instead of failing.
+
+---
+
+## Repository layout
 
 ```
-saliency_driving/          # library package
-├── config.py, log.py      # config, logging, seeding
-├── datasets.py            # RGB-D dataset
-├── annotations.py         # GT mask → bounding boxes
-├── fusion.py              # RGB + saliency fusion module
-├── metrics.py             # saliency + detection metrics
-├── train.py, evaluate.py  # detector training / evaluation
-├── pipeline.py            # single-image end-to-end inference
-├── models/                # cmSalGAN + ResNet backbone
-├── saliency/              # generation, MiDaS depth, heuristic fallback
-└── simulation/            # simulator, obstacle avoidance, visualization
-scripts/                   # download_data, run_ablation, make_demo_gif, make_explainability
-tests/                     # pytest suite
-data/, docs/, models/      # sample dataset, figures, checkpoints
-main.py                    # CLI (pipeline stages + --infer)
-app.py                     # Gradio web demo
-config.yaml                # paths + hyperparameters
+.
+├── saliency_driving/
+│   ├── config.py · log.py      configuration, logging, seeding
+│   ├── datasets.py             RGB-D dataset
+│   ├── annotations.py          ground-truth mask → bounding boxes
+│   ├── fusion.py               RGB + saliency fusion module
+│   ├── metrics.py              saliency and detection metrics
+│   ├── train.py · evaluate.py  detector training and evaluation
+│   ├── pipeline.py             single-image end-to-end inference
+│   ├── models/                 cmSalGAN + ResNet backbone
+│   ├── saliency/               generation, MiDaS depth, heuristic fallback
+│   └── simulation/             simulator, obstacle avoidance, visualisation
+├── scripts/                    download_data, run_ablation, make_demo_gif, make_explainability
+├── tests/                      pytest suite
+├── data/ · docs/ · models/     sample dataset, figures, checkpoints
+├── main.py                     CLI: pipeline stages and --infer
+├── app.py                      Gradio web demo
+└── config.yaml                 paths and hyperparameters
 ```
 
-## Testing
+---
 
-```bash
-pytest -m "not slow"   # fast unit suite (metrics, datasets, fusion, simulation, config)
-pytest -m slow         # + one full training step through the real pipeline
-ruff check .           # lint
-```
+## Documentation
 
-GitHub Actions runs the lint and fast suite on every push and pull request.
+| Question | File |
+|---|---|
+| *How do I publish the demo?* | [docs/DEPLOY_HF_SPACES.md](docs/DEPLOY_HF_SPACES.md) |
+| *Which paths and hyperparameters apply?* | [config.yaml](config.yaml) |
+| *How is the ablation run?* | [scripts/run_ablation.py](scripts/run_ablation.py) |
+
+---
+
+## Team
+
+| Member | Focus |
+|---|---|
+| **Guru R Bharadwaj** | Pipeline, fusion and detection, ablation, simulation, demo |
+
+---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE).
