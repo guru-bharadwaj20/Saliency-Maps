@@ -1,4 +1,12 @@
 # Saliency-Aware Autonomous Driving
+<p align="center">
+  <a href="Saliency-Maps%20Demo.mp4">
+    <img src="docs/Saliency-Maps%20Demo%20thumbnail.png" alt="Watch the Saliency-Maps demo video" width="720">
+  </a>
+  <br>
+  <sub>▶ <b><a href="Saliency-Maps%20Demo.mp4">Watch the Saliency-Maps demo</a></b> (90 s): a fresh clone running the Gradio demo on real photos (depth, saliency, detections and a simulated car), with the README's numbers checked against a re-run</sub>
+</p>
+
 
 **An end-to-end vision pipeline — RGB-D saliency, saliency-guided fusion, Faster R-CNN detection and potential-field navigation — with an ablation that reports where the idea does not pay.**
 
